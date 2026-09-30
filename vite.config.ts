@@ -13,6 +13,12 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
   },
+  // `vite preview` ignores `server.host`, so bind it explicitly too — otherwise
+  // it listens on loopback only and is unreachable from outside the container.
+  preview: {
+    host: '0.0.0.0',
+    port: 4173,
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

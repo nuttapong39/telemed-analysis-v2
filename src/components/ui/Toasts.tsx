@@ -21,12 +21,10 @@ const ICON_MAP: Record<NotificationLevel, React.ComponentType<{ className?: stri
 }
 
 const TONE_CLASSES: Record<NotificationLevel, string> = {
-  error: 'border-red-400 bg-red-50 text-red-900 dark:border-red-800 dark:bg-red-950/80 dark:text-red-100',
-  warning:
-    'border-amber-400 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950/80 dark:text-amber-100',
-  info: 'border-sky-400 bg-sky-50 text-sky-900 dark:border-sky-800 dark:bg-sky-950/80 dark:text-sky-100',
-  success:
-    'border-emerald-400 bg-emerald-50 text-emerald-900 dark:border-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-100',
+  error: 'border-rose-100 text-rose-700 [&>svg]:text-rose-500',
+  warning: 'border-amber-100 text-amber-800 [&>svg]:text-amber-500',
+  info: 'border-sky-100 text-sky-800 [&>svg]:text-sky-500',
+  success: 'border-emerald-100 text-emerald-800 [&>svg]:text-emerald-500',
 }
 
 function ToastCard({
@@ -49,7 +47,8 @@ function ToastCard({
       role="status"
       aria-live={notification.level === 'error' ? 'assertive' : 'polite'}
       className={cn(
-        'pointer-events-auto flex items-start gap-3 rounded-md border px-4 py-3 shadow-md transition-all',
+        'pointer-events-auto flex items-start gap-3 rounded-xl border bg-white/95 px-4 py-3 backdrop-blur transition-all',
+        'shadow-[0_12px_32px_-12px_rgb(15_23_42/0.25)]',
         'animate-in slide-in-from-right-full fade-in',
         TONE_CLASSES[notification.level],
       )}

@@ -137,7 +137,7 @@ export function downloadTextFile(
 ): void {
   if (typeof document === 'undefined') return;
 
-  const blob = new Blob([`﻿${contents}`], { type: mimeType });
+  const blob = new Blob([`\uFEFF${contents}`], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;

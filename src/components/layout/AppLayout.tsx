@@ -1,6 +1,7 @@
 // =============================================================================
-// BMS Session KPI Dashboard - App Layout
-// Top-level layout wrapper with refined spacing and background
+// Telemed Analytics - App Layout
+// Header over the page. The white-to-smoke gradient lives on <body>, so the
+// layout itself stays transparent.
 // =============================================================================
 
 import type { ReactNode } from 'react';
@@ -12,35 +13,9 @@ interface AppLayoutProps {
 
 export function AppLayout({ children }: AppLayoutProps) {
   return (
-    <div className="app-layout">
+    <div className="flex min-h-screen flex-col">
       <AppHeader />
-      <main className="app-main">{children}</main>
-      <style>{`
-        .app-layout {
-          display: flex;
-          flex-direction: column;
-          min-height: 100vh;
-          background:
-            linear-gradient(180deg, hsl(var(--background)) 0%, hsl(var(--muted) / 0.3) 100%);
-        }
-
-        .app-main {
-          flex: 1;
-          padding: 2rem 1.5rem;
-        }
-
-        @media (min-width: 768px) {
-          .app-main {
-            padding: 2.5rem 2rem;
-          }
-        }
-
-        @media (min-width: 1280px) {
-          .app-main {
-            padding: 3rem 3rem;
-          }
-        }
-      `}</style>
+      <main className="flex-1">{children}</main>
     </div>
   );
 }

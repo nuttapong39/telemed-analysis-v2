@@ -1,556 +1,426 @@
 // =============================================================================
-// Telemedicine Dashboard - Aggregation Service Tests
-// Query construction + pure client-side aggregation over raw visit rows
+// Telemedicine Dashboard - Monthly Service Summary Tests
+// Fiscal-year maths, query construction, normalisation, series + CSV
 // =============================================================================
 
 import { describe, it, expect } from 'vitest';
 import {
+  TELEMED_SERVICES,
   TELEMED_ICODES,
-  TELEHEALTH_ICODE,
-  buildTelemedSql,
-  buildTelemedParams,
-  normalizeTelemedRows,
-  distinctVisits,
-  totalVisits,
-  totalCost,
-  aggregateByMonth,
-  aggregateByPttype,
-  aggregateByServiceType,
-  buildFetchWindow,
-  shiftRange,
+  fiscalYearOf,
+  fiscalYearRange,
+  fiscalMonths,
+  fiscalMonthLabel,
+  fiscalYearOptions,
+  elapsedMonths,
+  buildTelemedFetchParams,
+  buildTelemedMonthlySql,
+  buildTelemedMonthlyTotalSql,
+  normalizeMonthlyRows,
+  normalizeMonthlyTotals,
+  buildFiscalSeries,
+  summarizeSeries,
   percentChange,
-  formatPatientLabel,
-  toCsv,
+  toMonthlyCsv,
+  csvFilename,
 } from '@/services/telemed';
-
-import type { TelemedRow } from '@/services/telemed';
+import type { MonthlyServiceRow } from '@/services/telemed';
 
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
-const SINGLE_QUOTE = String.fromCharCode(39);
-
-/** Builds a raw API row (snake_case, stringly-typed — as the API delivers it). */
-function rawRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function row(overrides: Partial<MonthlyServiceRow> = {}): MonthlyServiceRow {
   return {
-    vn: 'VN001',
-    hn: 'HN001',
-    vstdate: '2026-09-01',
-    vsttime: '09:15:00',
-    icode: '3002416',
-    service_name: 'Telehealth',
-    pttype_name: 'UC',
-    sum_price: '1500',
-    pname: 'นาง',
-    fname: 'สมศรี',
-    lname: 'ใจดี',
-    ...overrides,
-  };
-}
-
-/** Builds a normalised typed row. */
-function row(overrides: Partial<TelemedRow> = {}): TelemedRow {
-  return {
-    vn: 'VN001',
-    hn: 'HN001',
-    vstdate: '2026-09-01',
-    vsttime: '09:15:00',
+    month: '2025-10',
     icode: '3002416',
     serviceName: 'Telehealth',
-    pttypeName: 'UC',
-    sumPrice: 1500,
-    pname: 'นาง',
-    fname: 'สมศรี',
-    lname: 'ใจดี',
+    itemRows: 10,
+    visits: 8,
+    qty: 10,
+    amount: 1000,
+    zeroPriceRows: 2,
     ...overrides,
   };
 }
 
+/** Local-time date, so fiscal boundaries are not shifted by the TZ. */
+function day(y: number, m: number, d: number): Date {
+  return new Date(y, m - 1, d);
+}
+
 // ---------------------------------------------------------------------------
-// Constants
+// Services
 // ---------------------------------------------------------------------------
 
-describe('telemed constants', () => {
-  it('covers exactly the three telemedicine service codes', () => {
-    expect(TELEMED_ICODES).toEqual(['3002416', '3002487', '3002488']);
+describe('TELEMED_SERVICES', () => {
+  it('lists B2B, B2C, Telehealth in display order', () => {
+    expect(TELEMED_SERVICES.map((s) => s.label)).toEqual(['B2B', 'B2C', 'Telehealth']);
   });
 
-  it('marks 3002416 as the telehealth service used for the cost trend', () => {
-    expect(TELEHEALTH_ICODE).toBe('3002416');
-    expect(TELEMED_ICODES).toContain(TELEHEALTH_ICODE);
+  it('maps each service to its icode', () => {
+    expect(TELEMED_SERVICES.map((s) => s.icode)).toEqual(['3002487', '3002488', '3002416']);
+    expect([...TELEMED_ICODES].sort()).toEqual(['3002416', '3002487', '3002488']);
   });
 });
 
 // ---------------------------------------------------------------------------
-// buildTelemedSql
+// Fiscal year
 // ---------------------------------------------------------------------------
 
-describe('buildTelemedSql', () => {
-  const sql = buildTelemedSql();
-
-  it('filters to every telemedicine icode', () => {
-    for (const icode of TELEMED_ICODES) {
-      expect(sql).toContain(icode);
-    }
+describe('fiscalYearOf', () => {
+  it('counts 30 Sep as the end of the Buddhist-era fiscal year', () => {
+    expect(fiscalYearOf(day(2026, 9, 30))).toBe(2569);
   });
 
-  it('joins the tables needed for service name, pttype name and patient name', () => {
-    for (const table of ['opitemrece', 'nondrugitems', 'ovst', 'patient', 'pttype']) {
-      expect(sql).toContain(table);
-    }
+  it('rolls over to the next fiscal year on 1 Oct', () => {
+    expect(fiscalYearOf(day(2026, 10, 1))).toBe(2570);
   });
 
-  it('binds the date range as named parameters rather than literals', () => {
+  it('keeps January in the fiscal year that started the October before', () => {
+    expect(fiscalYearOf(day(2026, 1, 15))).toBe(2569);
+  });
+});
+
+describe('fiscalYearRange', () => {
+  it('spans 1 Oct of the prior CE year to 30 Sep', () => {
+    expect(fiscalYearRange(2569)).toEqual({ start: '2025-10-01', end: '2026-09-30' });
+  });
+});
+
+describe('fiscalMonths', () => {
+  it('returns twelve months from October to September', () => {
+    const months = fiscalMonths(2569);
+    expect(months).toHaveLength(12);
+    expect(months[0]).toBe('2025-10');
+    expect(months[3]).toBe('2026-01');
+    expect(months[11]).toBe('2026-09');
+  });
+});
+
+describe('fiscalMonthLabel', () => {
+  it('renders a short Thai month with a two-digit Buddhist year', () => {
+    expect(fiscalMonthLabel('2025-10')).toBe('ต.ค. 68');
+    expect(fiscalMonthLabel('2026-09')).toBe('ก.ย. 69');
+  });
+});
+
+describe('fiscalYearOptions', () => {
+  it('offers the current fiscal year and the four before it, newest first', () => {
+    expect(fiscalYearOptions(2570)).toEqual([2570, 2569, 2568, 2567, 2566]);
+  });
+
+  it('honours a custom count', () => {
+    expect(fiscalYearOptions(2569, 2)).toEqual([2569, 2568]);
+  });
+});
+
+describe('elapsedMonths', () => {
+  it('is 12 for a fiscal year that has ended', () => {
+    expect(elapsedMonths(2568, day(2026, 9, 30))).toBe(12);
+  });
+
+  it('is 12 on the last day of the fiscal year', () => {
+    expect(elapsedMonths(2569, day(2026, 9, 30))).toBe(12);
+  });
+
+  it('counts the current month on the first day of a fiscal year', () => {
+    expect(elapsedMonths(2570, day(2026, 10, 1))).toBe(1);
+  });
+
+  it('counts October through the current month mid-year', () => {
+    expect(elapsedMonths(2570, day(2026, 12, 15))).toBe(3);
+  });
+
+  it('is 0 for a fiscal year that has not started', () => {
+    expect(elapsedMonths(2571, day(2026, 9, 30))).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Query
+// ---------------------------------------------------------------------------
+
+describe('buildTelemedFetchParams', () => {
+  it('covers the selected fiscal year and the one before it', () => {
+    expect(buildTelemedFetchParams(2569)).toEqual({
+      start_date: { value: '2024-10-01', value_type: 'date' },
+      end_date: { value: '2026-09-30', value_type: 'date' },
+    });
+  });
+});
+
+describe('buildTelemedMonthlySql', () => {
+  const sql = buildTelemedMonthlySql();
+
+  it('groups by year and month with EXTRACT so it runs on PostgreSQL and MySQL', () => {
+    expect(sql).toContain('EXTRACT(YEAR FROM o.vstdate)');
+    expect(sql).toContain('EXTRACT(MONTH FROM o.vstdate)');
+    expect(sql).not.toMatch(/TO_CHAR|DATE_FORMAT/);
+  });
+
+  it('selects every summary column of the monthly service query', () => {
+    for (const column of [
+      'service_name',
+      'item_rows',
+      'visit_count',
+      'total_qty',
+      'total_amount',
+      'zero_price_rows',
+    ]) {
+      expect(sql).toContain(`AS ${column}`);
+    }
+    expect(sql).toContain('COUNT(DISTINCT o.vn)');
+    expect(sql).toContain('SUM(CASE WHEN o.unitprice = 0 THEN 1 ELSE 0 END)');
+  });
+
+  it('filters to the three telemedicine icodes', () => {
+    for (const icode of TELEMED_ICODES) expect(sql).toContain(`'${icode}'`);
+  });
+
+  it('binds the date window instead of interpolating it', () => {
+    expect(sql).toContain('o.vstdate BETWEEN :start_date AND :end_date');
+    expect(sql).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+  });
+
+  it('is bounded by a LIMIT', () => {
+    expect(sql).toMatch(/LIMIT \d+/);
+  });
+});
+
+describe('buildTelemedMonthlyTotalSql', () => {
+  const sql = buildTelemedMonthlyTotalSql();
+
+  it('counts distinct visits per month across all three services', () => {
+    expect(sql).toContain('COUNT(DISTINCT o.vn) AS visit_count');
+    expect(sql).toContain('EXTRACT(MONTH FROM o.vstdate)');
+    expect(sql).not.toMatch(/GROUP BY[^;]*icode/);
+  });
+
+  it('binds the same date window', () => {
     expect(sql).toContain(':start_date');
     expect(sql).toContain(':end_date');
-    expect(sql).not.toMatch(/BETWEEN\s+\d{4}-\d{2}-\d{2}/);
-  });
-
-  it('does not reference any void column this schema lacks', () => {
-    const sqlWithoutAlias = sql.replace(/LEFT JOIN/g, '');
-    expect(sqlWithoutAlias).not.toContain('void_staff');
-  });
-
-  it('aliases every selected column into snake_case', () => {
-    for (const alias of [
-      'vn',
-      'hn',
-      'vstdate',
-      'vsttime',
-      'icode',
-      'service_name',
-      'pttype_name',
-      'sum_price',
-    ]) {
-      expect(sql).toContain(alias);
-    }
   });
 });
 
 // ---------------------------------------------------------------------------
-// buildTelemedParams
+// Normalisation
 // ---------------------------------------------------------------------------
 
-describe('buildTelemedParams', () => {
-  it('produces date-typed bindings for the range', () => {
-    const params = buildTelemedParams('2026-09-01', '2026-09-30');
-
-    expect(params.start_date).toEqual({
-      value: '2026-09-01',
-      value_type: 'date',
+describe('normalizeMonthlyRows', () => {
+  it('coerces stringly-typed API values and builds a yyyy-MM month', () => {
+    const [r] = normalizeMonthlyRows([
+      {
+        yr: '2025',
+        mon: '9',
+        icode: '3002487',
+        service_name: ' B2B รพ.สต. ',
+        item_rows: '12',
+        visit_count: '10',
+        total_qty: '12.00',
+        total_amount: '1,500.50',
+        zero_price_rows: '3',
+      },
+    ]);
+    expect(r).toEqual({
+      month: '2025-09',
+      icode: '3002487',
+      serviceName: 'B2B รพ.สต.',
+      itemRows: 12,
+      visits: 10,
+      qty: 12,
+      amount: 1500.5,
+      zeroPriceRows: 3,
     });
-    expect(params.end_date).toEqual({ value: '2026-09-30', value_type: 'date' });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// normalizeTelemedRows
-// ---------------------------------------------------------------------------
-
-describe('normalizeTelemedRows', () => {
-  it('maps snake_case to camelCase and coerces numbers', () => {
-    const [parsed] = normalizeTelemedRows([rawRow()]);
-
-    expect(parsed.serviceName).toBe('Telehealth');
-    expect(parsed.pttypeName).toBe('UC');
-    expect(parsed.sumPrice).toBe(1500);
-    expect(typeof parsed.sumPrice).toBe('number');
   });
 
-  it('truncates a datetime vstdate to its date portion', () => {
-    const [parsed] = normalizeTelemedRows([
-      rawRow({ vstdate: '2026-09-01T00:00:00.000Z' }),
-    ]);
-
-    expect(parsed.vstdate).toBe('2026-09-01');
+  it('accepts numeric year/month, including PostgreSQL numeric decimals', () => {
+    const [r] = normalizeMonthlyRows([{ yr: 2026, mon: '1.0', icode: '3002416' }]);
+    expect(r.month).toBe('2026-01');
   });
 
-  it('coerces a numeric-string sum_price and defaults junk to 0', () => {
-    const rows = normalizeTelemedRows([
-      rawRow({ sum_price: '250.75' }),
-      rawRow({ vn: 'VN002', sum_price: null }),
-      rawRow({ vn: 'VN003', sum_price: 'abc' }),
-    ]);
-
-    expect(rows.map((r) => r.sumPrice)).toEqual([250.75, 0, 0]);
+  it('accepts a preformatted year_month column', () => {
+    const [r] = normalizeMonthlyRows([{ year_month: '2026-03', icode: '3002416' }]);
+    expect(r.month).toBe('2026-03');
   });
 
-  it('defaults missing optional text fields to empty strings', () => {
-    const [parsed] = normalizeTelemedRows([
-      rawRow({ pname: null, fname: null, lname: null, pttype_name: null }),
-    ]);
-
-    expect(parsed.pname).toBe('');
-    expect(parsed.fname).toBe('');
-    expect(parsed.lname).toBe('');
-    expect(parsed.pttypeName).toBe('');
-  });
-
-  it('drops rows without a vn', () => {
-    const rows = normalizeTelemedRows([rawRow({ vn: '' }), rawRow({ vn: 'VN9' })]);
-
-    expect(rows).toHaveLength(1);
-    expect(rows[0].vn).toBe('VN9');
-  });
-
-  it('returns an empty array for undefined / empty data', () => {
-    expect(normalizeTelemedRows(undefined)).toEqual([]);
-    expect(normalizeTelemedRows([])).toEqual([]);
-  });
-
-  it('normalises a comma-grouped sum_price', () => {
-    const [parsed] = normalizeTelemedRows([rawRow({ sum_price: '1,500.50' })]);
-
-    expect(parsed.sumPrice).toBe(1500.5);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// distinctVisits / totals
-//
-// A vn can appear on several opitemrece lines (one per item). Every headline
-// number counts *visits*, so a repeated vn must collapse to a single visit.
-// ---------------------------------------------------------------------------
-
-describe('distinctVisits', () => {
-  it('collapses repeated vn values to one visit', () => {
-    const visits = distinctVisits([
-      row({ vn: 'VN1' }),
-      row({ vn: 'VN1' }),
-      row({ vn: 'VN2' }),
-    ]);
-
-    expect(visits).toHaveLength(2);
-  });
-
-  it('keeps the first row seen for a vn so later aggregations are stable', () => {
-    const visits = distinctVisits([
-      row({ vn: 'VN1', pttypeName: 'UC' }),
-      row({ vn: 'VN1', pttypeName: 'Cash' }),
-    ]);
-
-    expect(visits[0].pttypeName).toBe('UC');
-  });
-});
-
-describe('totalVisits', () => {
-  it('counts distinct visits, not item lines', () => {
+  it('drops rows with no month or an icode outside the three services', () => {
     expect(
-      totalVisits([row({ vn: 'VN1' }), row({ vn: 'VN1' }), row({ vn: 'VN2' })]),
-    ).toBe(2);
+      normalizeMonthlyRows([
+        { icode: '3002416' },
+        { yr: '2026', mon: '13', icode: '3002416' },
+        { yr: '2026', mon: '1', icode: '9999999' },
+      ]),
+    ).toEqual([]);
   });
 
-  it('is 0 for no rows', () => {
-    expect(totalVisits([])).toBe(0);
+  it('returns an empty list for missing data', () => {
+    expect(normalizeMonthlyRows(undefined)).toEqual([]);
   });
 });
 
-describe('totalCost', () => {
-  it('sums sum_price across every item line', () => {
+describe('normalizeMonthlyTotals', () => {
+  it('maps each month to its distinct visit count', () => {
     expect(
-      totalCost([row({ sumPrice: 100 }), row({ sumPrice: 250.5 })]),
-    ).toBe(350.5);
-  });
-
-  it('is 0 for no rows', () => {
-    expect(totalCost([])).toBe(0);
+      normalizeMonthlyTotals([
+        { yr: '2025', mon: '10', visit_count: '7' },
+        { yr: '2025', mon: '11', visit_count: 3 },
+      ]),
+    ).toEqual([
+      { month: '2025-10', visits: 7 },
+      { month: '2025-11', visits: 3 },
+    ]);
   });
 });
 
 // ---------------------------------------------------------------------------
-// aggregateByMonth
+// Series
 // ---------------------------------------------------------------------------
 
-describe('aggregateByMonth', () => {
-  it('groups by calendar month ascending', () => {
-    const points = aggregateByMonth([
-      row({ vn: 'VN1', vstdate: '2026-08-05' }),
-      row({ vn: 'VN2', vstdate: '2026-07-01' }),
-      row({ vn: 'VN3', vstdate: '2026-08-20' }),
-    ]);
+describe('buildFiscalSeries', () => {
+  const today = day(2026, 9, 30);
 
-    expect(points.map((p) => p.month)).toEqual(['2026-07', '2026-08']);
+  it('always returns the twelve fiscal months, filling gaps with zeros', () => {
+    const series = buildFiscalSeries([], [], 2569, today);
+    expect(series.map((p) => p.month)).toEqual(fiscalMonths(2569));
+    expect(series[0].label).toBe('ต.ค. 68');
+    expect(series[0].total.visits).toBe(0);
+    expect(series[0].services.telehealth.amount).toBe(0);
   });
 
-  it('counts distinct visits per month', () => {
-    const points = aggregateByMonth([
-      row({ vn: 'VN1', vstdate: '2026-08-05' }),
-      row({ vn: 'VN1', vstdate: '2026-08-06' }),
-      row({ vn: 'VN2', vstdate: '2026-08-20' }),
-    ]);
-
-    expect(points[0].visits).toBe(2);
-  });
-
-  it('sums cost per month', () => {
-    const points = aggregateByMonth([
-      row({ vn: 'VN1', vstdate: '2026-08-05', sumPrice: 100 }),
-      row({ vn: 'VN2', vstdate: '2026-08-20', sumPrice: 400 }),
-    ]);
-
-    expect(points[0].cost).toBe(500);
-  });
-
-  it('labels each point with a Thai month name and Buddhist year', () => {
-    const points = aggregateByMonth([row({ vn: 'VN1', vstdate: '2026-08-05' })]);
-
-    expect(points[0].label).toContain('ส.ค.');
-    expect(points[0].label).toContain('2569');
-  });
-
-  it('accepts a cost filter so only the telehealth icode is summed', () => {
-    const points = aggregateByMonth(
+  it('places each row under its service key', () => {
+    const series = buildFiscalSeries(
       [
-        row({ vn: 'VN1', vstdate: '2026-08-05', icode: '3002416', sumPrice: 100 }),
-        row({ vn: 'VN2', vstdate: '2026-08-06', icode: '3002487', sumPrice: 900 }),
+        row({ icode: '3002487', visits: 3, amount: 300 }),
+        row({ icode: '3002416', visits: 5, amount: 500 }),
       ],
-      (r) => r.icode === '3002416',
+      [],
+      2569,
+      today,
     );
-
-    expect(points[0].cost).toBe(100);
+    expect(series[0].services.b2b.visits).toBe(3);
+    expect(series[0].services.telehealth.amount).toBe(500);
+    expect(series[0].services.b2c.visits).toBe(0);
   });
 
-  it('returns an empty array for no rows', () => {
-    expect(aggregateByMonth([])).toEqual([]);
+  it('ignores rows outside the fiscal year', () => {
+    const series = buildFiscalSeries([row({ month: '2025-09' })], [], 2569, today);
+    expect(series.every((p) => p.total.visits === 0)).toBe(true);
+  });
+
+  it('sums every metric for the month total', () => {
+    const series = buildFiscalSeries(
+      [
+        row({ icode: '3002487', itemRows: 4, qty: 5, amount: 100, zeroPriceRows: 1 }),
+        row({ icode: '3002488', itemRows: 6, qty: 7, amount: 200, zeroPriceRows: 2 }),
+      ],
+      [],
+      2569,
+      today,
+    );
+    expect(series[0].total).toMatchObject({
+      itemRows: 10,
+      qty: 12,
+      amount: 300,
+      zeroPriceRows: 3,
+    });
+  });
+
+  it('prefers the distinct monthly visit total so shared visits are not double-counted', () => {
+    const series = buildFiscalSeries(
+      [row({ icode: '3002487', visits: 3 }), row({ icode: '3002416', visits: 3 })],
+      [{ month: '2025-10', visits: 5 }],
+      2569,
+      today,
+    );
+    expect(series[0].total.visits).toBe(5);
+  });
+
+  it('falls back to summing service visits when no total is available', () => {
+    const series = buildFiscalSeries(
+      [row({ icode: '3002487', visits: 3 }), row({ icode: '3002416', visits: 3 })],
+      [],
+      2569,
+      today,
+    );
+    expect(series[0].total.visits).toBe(6);
+  });
+
+  it('flags months after today as future', () => {
+    const series = buildFiscalSeries([], [], 2570, day(2026, 12, 15));
+    expect(series.map((p) => p.isFuture)).toEqual([
+      false, false, false, true, true, true, true, true, true, true, true, true,
+    ]);
   });
 });
 
-// ---------------------------------------------------------------------------
-// aggregateByPttype
-// ---------------------------------------------------------------------------
+describe('summarizeSeries', () => {
+  const series = buildFiscalSeries(
+    [
+      row({ month: '2025-10', icode: '3002487', visits: 2, amount: 200 }),
+      row({ month: '2025-11', icode: '3002487', visits: 3, amount: 300 }),
+      row({ month: '2025-12', icode: '3002416', visits: 4, amount: 400 }),
+    ],
+    [],
+    2569,
+    day(2026, 9, 30),
+  );
 
-describe('aggregateByPttype', () => {
-  it('sorts by visits descending', () => {
-    const points = aggregateByPttype([
-      row({ vn: 'VN1', pttypeName: 'Cash' }),
-      row({ vn: 'VN2', pttypeName: 'UC' }),
-      row({ vn: 'VN3', pttypeName: 'UC' }),
-      row({ vn: 'VN4', pttypeName: 'UC' }),
-    ]);
-
-    expect(points.map((p) => p.pttypeName)).toEqual(['UC', 'Cash']);
-    expect(points[0].visits).toBe(3);
+  it('sums the whole year by default', () => {
+    const sum = summarizeSeries(series);
+    expect(sum.total.visits).toBe(9);
+    expect(sum.services.b2b.amount).toBe(500);
+    expect(sum.services.telehealth.visits).toBe(4);
   });
 
-  it('reports each share as a percentage of total visits', () => {
-    const points = aggregateByPttype([
-      row({ vn: 'VN1', pttypeName: 'UC' }),
-      row({ vn: 'VN2', pttypeName: 'UC' }),
-      row({ vn: 'VN3', pttypeName: 'Cash' }),
-      row({ vn: 'VN4', pttypeName: 'Cash' }),
-    ]);
-
-    expect(points.map((p) => p.percent)).toEqual([50, 50]);
-  });
-
-  it('makes the percentages sum to 100', () => {
-    const points = aggregateByPttype([
-      row({ vn: 'VN1', pttypeName: 'A' }),
-      row({ vn: 'VN2', pttypeName: 'B' }),
-      row({ vn: 'VN3', pttypeName: 'C' }),
-    ]);
-
-    const sum = points.reduce((acc, p) => acc + p.percent, 0);
-    expect(sum).toBeCloseTo(100, 6);
-  });
-
-  it('buckets a blank pttype name instead of dropping the visit', () => {
-    const points = aggregateByPttype([
-      row({ vn: 'VN1', pttypeName: '' }),
-      row({ vn: 'VN2', pttypeName: 'UC' }),
-    ]);
-
-    const total = points.reduce((acc, p) => acc + p.visits, 0);
-    expect(total).toBe(2);
-  });
-
-  it('is empty for no rows', () => {
-    expect(aggregateByPttype([])).toEqual([]);
+  it('sums only the first N months for a year-to-date comparison', () => {
+    const sum = summarizeSeries(series, 2);
+    expect(sum.total.visits).toBe(5);
+    expect(sum.services.telehealth.visits).toBe(0);
   });
 });
-
-// ---------------------------------------------------------------------------
-// aggregateByServiceType
-// ---------------------------------------------------------------------------
-
-describe('aggregateByServiceType', () => {
-  it('breaks visits down per icode, descending', () => {
-    const points = aggregateByServiceType([
-      row({ vn: 'VN1', icode: '3002416', serviceName: 'Telehealth' }),
-      row({ vn: 'VN2', icode: '3002487', serviceName: 'Telemed consult' }),
-      row({ vn: 'VN3', icode: '3002487', serviceName: 'Telemed consult' }),
-    ]);
-
-    expect(points.map((p) => p.icode)).toEqual(['3002487', '3002416']);
-    expect(points[0].visits).toBe(2);
-  });
-
-  it('carries the service name through for display', () => {
-    const points = aggregateByServiceType([
-      row({ vn: 'VN1', icode: '3002416', serviceName: 'Telehealth' }),
-    ]);
-
-    expect(points[0].serviceName).toBe('Telehealth');
-  });
-
-  it('reports each service share of total visits', () => {
-    const points = aggregateByServiceType([
-      row({ vn: 'VN1', icode: '3002416' }),
-      row({ vn: 'VN2', icode: '3002487' }),
-      row({ vn: 'VN3', icode: '3002487' }),
-      row({ vn: 'VN4', icode: '3002487' }),
-    ]);
-
-    expect(points[0].percent).toBe(75);
-    expect(points[1].percent).toBe(25);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// buildFetchWindow
-//
-// The charts always want 12 months of context; the fetch window must widen to
-// cover that even when the user picked a shorter range.
-// ---------------------------------------------------------------------------
-
-describe('buildFetchWindow', () => {
-  it('widens a short range back to a full 12 months', () => {
-    const { fetchStart } = buildFetchWindow('2026-09-01', '2026-09-30');
-
-    expect(fetchStart).toBe('2025-10-01');
-  });
-
-  it('keeps the requested start when the range is already longer than 12 months', () => {
-    const { fetchStart } = buildFetchWindow('2024-01-01', '2026-09-30');
-
-    expect(fetchStart).toBe('2024-01-01');
-  });
-
-  it('does not move the end date forward', () => {
-    const { fetchEnd } = buildFetchWindow('2026-09-01', '2026-09-30');
-
-    expect(fetchEnd).toBe('2026-09-30');
-  });
-
-  it('reaches 12 months back inclusive of the end month', () => {
-    // A single-month range in September must still see October of the year before.
-    const { fetchStart } = buildFetchWindow('2026-09-15', '2026-09-15');
-
-    expect(fetchStart).toBe('2025-10-01');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// shiftRange
-// ---------------------------------------------------------------------------
-
-describe('shiftRange', () => {
-  it('returns the equal-length window immediately before the range', () => {
-    const { prevStart, prevEnd } = shiftRange('2026-09-01', '2026-09-30');
-
-    expect(prevEnd).toBe('2026-08-31');
-    expect(prevStart).toBe('2026-08-02');
-  });
-
-  it('handles a single-day range', () => {
-    const { prevStart, prevEnd } = shiftRange('2026-09-10', '2026-09-10');
-
-    expect(prevStart).toBe('2026-09-09');
-    expect(prevEnd).toBe('2026-09-09');
-  });
-
-  it('does not overlap with the current range', () => {
-    const { prevEnd } = shiftRange('2026-09-01', '2026-09-30');
-
-    expect(prevEnd < '2026-09-01').toBe(true);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// percentChange
-// ---------------------------------------------------------------------------
 
 describe('percentChange', () => {
-  it('reports growth as a positive percentage', () => {
-    expect(percentChange(150, 100)).toBe(50);
+  it('rounds to one decimal', () => {
+    expect(percentChange(115, 100)).toBe(15);
+    expect(percentChange(1, 3)).toBe(-66.7);
   });
 
-  it('reports decline as a negative percentage', () => {
-    expect(percentChange(50, 100)).toBe(-50);
-  });
-
-  it('returns null when there is no baseline to compare against', () => {
+  it('is null when there is no baseline', () => {
     expect(percentChange(10, 0)).toBeNull();
   });
-
-  it('is 0 for an unchanged value', () => {
-    expect(percentChange(100, 100)).toBe(0);
-  });
 });
 
 // ---------------------------------------------------------------------------
-// formatPatientLabel
+// CSV
 // ---------------------------------------------------------------------------
 
-describe('formatPatientLabel', () => {
-  it('joins the Thai prefix and name, keeping the HN alongside', () => {
-    const label = formatPatientLabel(row());
-
-    expect(label).toContain('นาง');
-    expect(label).toContain('สมศรี');
-    expect(label).toContain('HN001');
-  });
-
-  it('omits the prefix when it is blank', () => {
-    const label = formatPatientLabel(row({ pname: '' }));
-
-    expect(label.startsWith('สมศรี')).toBe(true);
-  });
-
-  it('falls back to a placeholder when no name is present', () => {
-    const label = formatPatientLabel(
-      row({ pname: '', fname: '', lname: '', hn: 'HN777' }),
+describe('toMonthlyCsv', () => {
+  it('emits the query columns for the fiscal year only, ordered by month then icode', () => {
+    const csv = toMonthlyCsv(
+      [
+        row({ month: '2025-11', icode: '3002416' }),
+        row({ month: '2025-10', icode: '3002488', serviceName: 'B2C, คนไข้' }),
+        row({ month: '2025-10', icode: '3002416' }),
+        row({ month: '2024-10', icode: '3002416' }),
+      ],
+      2569,
     );
-
-    expect(label).toContain('HN777');
-    expect(label).not.toMatch(/^\s*\(/);
+    const lines = csv.split('\n');
+    expect(lines[0]).toBe(
+      'year_month,icode,service_name,item_rows,visit_count,total_qty,total_amount,zero_price_rows',
+    );
+    expect(lines.slice(1).map((l) => l.split(',').slice(0, 2).join(','))).toEqual([
+      '2025-10,3002416',
+      '2025-10,3002488',
+      '2025-11,3002416',
+    ]);
+    expect(lines[2]).toContain('"B2C, คนไข้"');
   });
 });
 
-// ---------------------------------------------------------------------------
-// toCsv
-// ---------------------------------------------------------------------------
-
-describe('toCsv', () => {
-  it('emits a header row then one row per record', () => {
-    const csv = toCsv([row()]);
-    const lines = csv.split('\n');
-
-    expect(lines).toHaveLength(2);
-    expect(lines[0]).toContain('vn');
-    expect(lines[1]).toContain('VN001');
-  });
-
-  it('quotes a value containing a comma', () => {
-    const csv = toCsv([row({ pttypeName: 'UC, ระดับ 1' })]);
-
-    expect(csv).toContain('"UC, ระดับ 1"');
-  });
-
-  it('escapes an embedded double quote by doubling it', () => {
-    const csv = toCsv([row({ fname: 'สม"ชาย' })]);
-
-    expect(csv).toContain('""');
-  });
-
-  it('neutralises a leading single quote so spreadsheets do not mangle it', () => {
-    const csv = toCsv([row({ fname: `${SINGLE_QUOTE}ทดสอบ` })]);
-
-    expect(csv).not.toContain(`, ${SINGLE_QUOTE}ทดสอบ`);
-  });
-
-  it('emits only the header for no rows', () => {
-    expect(toCsv([]).split('\n')).toHaveLength(1);
+describe('csvFilename', () => {
+  it('names the export after the fiscal year', () => {
+    expect(csvFilename(2569)).toBe('telemed-fy2569.csv');
   });
 });

@@ -1,26 +1,24 @@
 // =============================================================================
 // Telemedicine Dashboard - drill-down detail modal
 //
-// Every KPI tile, chart mark and table row opens this. It answers the five
-// questions a viewer asks of any number: how is it derived, what has it done
-// over the last year, how does it compare with the period before, which records
-// make it up, and can I take the raw data away.
-//
-// Deliberately not a second fetch — the dashboard already holds the full year
-// of rows, so everything here is sliced client-side and the page never reloads.
+// Opened from a service card or a chart segment. Answers: how is the figure
+// derived, how does it compare with the prior fiscal year, and how did it move
+// month by month. Everything is sliced from the fiscal series the dashboard
+// already holds — no second fetch.
 // =============================================================================
 
-import type { ReactNode } from 'react';
+import { useState } from 'react';
 import {
   Area,
-  AreaChart,
+  ComposedChart,
   CartesianGrid,
+  Line,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from 'recharts';
-import { Download, TrendingUp } from 'lucide-react';
+import { Info } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -29,335 +27,275 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
-import { ChangeBadge, ProportionBar } from '@/components/telemed/primitives';
-import type { MonthPoint } from '@/services/telemed';
-import {
-  formatBaht,
-  formatNumber,
-  formatPercent,
-  formatThaiDate,
-  formatTime,
-} from '@/utils/format';
-
-/** One row in the "recent records" list. */
-export interface DetailRecord {
-  id: string;
-  /** Primary line, e.g. the patient label. */
-  primary: string;
-  /** Secondary line, e.g. HN + service + payer. */
-  secondary: string;
-  /** Date shown on the right. */
-  date: string;
-  time?: string;
-  amount?: number;
-  onClick?: () => void;
-}
-
-export interface ComparisonItem {
-  label: string;
-  current: number;
-  previous: number;
-  /** Render a value; defaults to a grouped number. */
-  format?: (value: number) => string;
-}
+import { ChangeBadge, SegmentedToggle } from '@/components/telemed/primitives';
+import { SERVICE_VISUALS } from '@/components/telemed/serviceTheme';
+import type { ServiceTone } from '@/components/telemed/serviceTheme';
+import type { TrendMetric } from '@/components/telemed/MonthlyTrendChart';
+import { percentChange } from '@/services/telemed';
+import type { FiscalMonthPoint, Metrics } from '@/services/telemed';
+import { NO_VALUE, formatBaht, formatNumber, formatPercent } from '@/utils/format';
 
 interface DetailModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  tone: ServiceTone;
   title: string;
-  /** Plain-language explanation of where the number comes from. */
+  description: string;
+  /** Plain-language explanation of where the numbers come from. */
   derivation: string;
-  /** The headline value, already formatted. */
-  headline: string;
-  headlineUnit?: string;
-  headlineSub?: ReactNode;
-  /** Series for the trend chart. */
-  trend?: MonthPoint[];
-  /** Which field of each trend point to plot. */
-  trendMetric?: 'visits' | 'cost';
-  comparisons?: ComparisonItem[];
-  records?: DetailRecord[];
-  recordsTitle?: string;
-  onExportCsv?: () => void;
-  onResetFilter?: () => void;
-  /** Extra content below the trend, e.g. a full breakdown table. */
-  children?: ReactNode;
+  series: readonly FiscalMonthPoint[];
+  previousSeries: readonly FiscalMonthPoint[];
+  fiscalYear: number;
+  /** Months of the fiscal year that have started — the comparison window. */
+  monthCount: number;
+  compareLabel: string;
+}
+
+function pick(point: FiscalMonthPoint, tone: ServiceTone): Metrics {
+  return tone === 'total' ? point.total : point.services[tone];
+}
+
+function sum(points: readonly FiscalMonthPoint[], tone: ServiceTone, count: number): Metrics {
+  const out: Metrics = { itemRows: 0, visits: 0, qty: 0, amount: 0, zeroPriceRows: 0 };
+  for (const p of points.slice(0, count)) {
+    const m = pick(p, tone);
+    out.itemRows += m.itemRows;
+    out.visits += m.visits;
+    out.qty += m.qty;
+    out.amount += m.amount;
+    out.zeroPriceRows += m.zeroPriceRows;
+  }
+  return out;
 }
 
 export function DetailModal({
   open,
   onOpenChange,
+  tone,
   title,
+  description,
   derivation,
-  headline,
-  headlineUnit,
-  headlineSub,
-  trend,
-  trendMetric = 'visits',
-  comparisons,
-  records,
-  recordsTitle = 'รายการล่าสุด',
-  onExportCsv,
-  onResetFilter,
-  children,
+  series,
+  previousSeries,
+  fiscalYear,
+  monthCount,
+  compareLabel,
 }: DetailModalProps) {
-  const metricLabel = trendMetric === 'cost' ? 'ยอดเงิน' : 'จำนวน visit';
-  const formatMetric =
-    trendMetric === 'cost' ? (v: number) => formatBaht(v) : (v: number) => formatNumber(v);
+  const [metric, setMetric] = useState<TrendMetric>('visits');
+  const visual = SERVICE_VISUALS[tone];
+  const Icon = visual.icon;
+  const gradientId = `detail-fill-${tone}`;
+
+  const current = sum(series, tone, monthCount);
+  const previous = sum(previousSeries, tone, monthCount);
+  const avg = (m: Metrics) => (m.visits > 0 ? m.amount / m.visits : 0);
+  const zeroShare = (m: Metrics) => (m.itemRows > 0 ? (m.zeroPriceRows / m.itemRows) * 100 : 0);
+
+  const chart = series.map((p, i) => ({
+    label: p.label,
+    current: p.isFuture ? null : pick(p, tone)[metric],
+    previous: previousSeries[i] ? pick(previousSeries[i], tone)[metric] : 0,
+  }));
+  const format = metric === 'amount' ? formatBaht : (v: number) => formatNumber(v);
+
+  const figures = [
+    {
+      label: 'Visit',
+      value: formatNumber(current.visits),
+      before: formatNumber(previous.visits),
+      change: percentChange(current.visits, previous.visits),
+    },
+    {
+      label: 'จำนวนเงิน',
+      value: formatBaht(current.amount),
+      before: formatBaht(previous.amount),
+      change: percentChange(current.amount, previous.amount),
+    },
+    {
+      label: 'เฉลี่ยต่อ Visit',
+      value: current.visits > 0 ? formatBaht(avg(current)) : NO_VALUE,
+      before: previous.visits > 0 ? formatBaht(avg(previous)) : NO_VALUE,
+      change: percentChange(avg(current), avg(previous)),
+    },
+    {
+      label: 'รายการไม่คิดเงิน',
+      value: current.itemRows > 0 ? formatPercent(zeroShare(current)) : NO_VALUE,
+      before: previous.itemRows > 0 ? formatPercent(zeroShare(previous)) : NO_VALUE,
+      sub: `${formatNumber(current.zeroPriceRows)} จาก ${formatNumber(current.itemRows)} รายการ`,
+    },
+  ];
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[88vh] max-w-3xl overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle className="text-lg">{title}</DialogTitle>
-          <DialogDescription className="leading-relaxed">
-            {derivation}
+      <DialogContent className="max-h-[90vh] grid-cols-[minmax(0,1fr)] gap-6 overflow-y-auto rounded-2xl sm:max-w-3xl border-border/70 p-6 sm:p-7">
+        <DialogHeader className="text-left">
+          <div className="flex items-center gap-3">
+            <span className={cn('grid h-11 w-11 shrink-0 place-items-center rounded-2xl', visual.tile)}>
+              <Icon className="h-5 w-5" aria-hidden="true" />
+            </span>
+            <div className="min-w-0">
+              <DialogTitle className="text-lg tracking-tight">{title}</DialogTitle>
+              <p className="text-sm text-muted-foreground">
+                {description} · ปีงบประมาณ {fiscalYear}
+              </p>
+            </div>
+          </div>
+          <DialogDescription className="mt-3 flex gap-2 rounded-xl bg-accent/60 px-3.5 py-2.5 text-xs leading-relaxed text-accent-foreground">
+            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <span>{derivation}</span>
           </DialogDescription>
         </DialogHeader>
 
-        {/* Headline -------------------------------------------------------- */}
-        <div className="rounded-xl border border-border/60 bg-muted/30 px-4 py-3">
-          <div className="flex items-baseline gap-2">
-            <span className="text-3xl font-semibold tabular-nums tracking-tight">
-              {headline}
-            </span>
-            {headlineUnit && (
-              <span className="text-sm font-medium text-muted-foreground">
-                {headlineUnit}
-              </span>
-            )}
+        {/* Year-over-year figures ------------------------------------------ */}
+        <section>
+          <h3 className="mb-3 text-sm font-semibold text-foreground">{compareLabel}</h3>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {figures.map((f) => (
+              <div key={f.label} className="rounded-xl border border-border/70 bg-card px-3.5 py-3">
+                <p className="text-xs text-muted-foreground">{f.label}</p>
+                <p className="mt-1 truncate text-lg font-semibold tabular-nums tracking-tight">
+                  {f.value}
+                </p>
+                <p className="mt-0.5 truncate text-xs tabular-nums text-muted-foreground">
+                  ปีงบก่อน {f.before}
+                </p>
+                <div className="mt-2">
+                  {'change' in f ? (
+                    <ChangeBadge change={f.change ?? null} />
+                  ) : (
+                    <span className="text-xs text-muted-foreground">{f.sub}</span>
+                  )}
+                </div>
+              </div>
+            ))}
           </div>
-          {headlineSub && (
-            <div className="mt-2 text-sm text-muted-foreground">{headlineSub}</div>
-          )}
-        </div>
+        </section>
 
-        {/* Prior-period comparison ----------------------------------------- */}
-        {comparisons && comparisons.length > 0 && (
-          <section>
-            <h3 className="mb-3 text-sm font-semibold text-foreground">
-              เทียบกับช่วงก่อนหน้า
-            </h3>
-            <div className="grid gap-3 sm:grid-cols-3">
-              {comparisons.map((item) => {
-                const format = item.format ?? ((v: number) => formatNumber(v));
-                const change =
-                  item.previous === 0
-                    ? null
-                    : Math.round(((item.current - item.previous) / item.previous) * 1000) /
-                      10;
+        {/* Trend ------------------------------------------------------------ */}
+        <section>
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <h3 className="text-sm font-semibold text-foreground">แนวโน้มรายเดือน</h3>
+            <SegmentedToggle
+              label="ตัวชี้วัดของกราฟ"
+              value={metric}
+              onChange={setMetric}
+              options={[
+                { value: 'visits', label: 'Visit' },
+                { value: 'amount', label: 'ยอดเงิน' },
+              ]}
+            />
+          </div>
+          <div className="h-52 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={chart} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                <defs>
+                  <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={visual.color} stopOpacity={0.3} />
+                    <stop offset="100%" stopColor={visual.color} stopOpacity={0.02} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 6" stroke="hsl(var(--border))" vertical={false} />
+                <XAxis
+                  dataKey="label"
+                  tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
+                  axisLine={false}
+                  tickLine={false}
+                  tickMargin={8}
+                />
+                <YAxis
+                  tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
+                  axisLine={false}
+                  tickLine={false}
+                  width={56}
+                  tickFormatter={(v: number) => formatNumber(v)}
+                />
+                <Tooltip
+                  formatter={(v, name) => [
+                    format(Number(v)),
+                    name === 'previous' ? `ปีงบ ${fiscalYear - 1}` : `ปีงบ ${fiscalYear}`,
+                  ]}
+                  contentStyle={{
+                    borderRadius: 12,
+                    border: '1px solid hsl(var(--border))',
+                    boxShadow: '0 12px 32px -12px rgb(15 23 42 / 0.25)',
+                    fontSize: 12,
+                  }}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="current"
+                  stroke={visual.color}
+                  strokeWidth={2.2}
+                  fill={`url(#${gradientId})`}
+                  connectNulls={false}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="previous"
+                  stroke="hsl(var(--muted-foreground))"
+                  strokeOpacity={0.55}
+                  strokeWidth={1.5}
+                  strokeDasharray="5 5"
+                  dot={false}
+                />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        </section>
 
-                return (
-                  <div
-                    key={item.label}
-                    className="rounded-xl border border-border/60 px-3 py-3"
-                  >
-                    <p className="text-xs text-muted-foreground">{item.label}</p>
-                    <p className="mt-1 text-lg font-semibold tabular-nums">
-                      {format(item.current)}
-                    </p>
-                    <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">
-                      ก่อนหน้า {format(item.previous)}
-                    </p>
-                    <div className="mt-2">
-                      <ChangeBadge change={change} />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-        )}
+        {/* Month table ------------------------------------------------------ */}
+        <section>
+          <h3 className="mb-3 text-sm font-semibold text-foreground">รายละเอียดรายเดือน</h3>
+          <div className="overflow-x-auto rounded-xl border border-border/70">
+            <table className="w-full min-w-[560px] text-sm">
+              <thead className="bg-muted/50 text-xs text-muted-foreground">
+                <tr>
+                  <th scope="col" className="px-3 py-2 text-left font-medium">เดือน</th>
+                  <th scope="col" className="px-3 py-2 text-right font-medium">รายการ</th>
+                  <th scope="col" className="px-3 py-2 text-right font-medium">Visit</th>
+                  <th scope="col" className="px-3 py-2 text-right font-medium">จำนวน</th>
+                  <th scope="col" className="px-3 py-2 text-right font-medium">ยอดเงิน (บาท)</th>
+                  <th scope="col" className="px-3 py-2 text-right font-medium">ไม่คิดเงิน</th>
+                  <th scope="col" className="px-3 py-2 text-right font-medium">
+                    Visit ปีงบ {fiscalYear - 1}
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border/50">
+                {series.map((p, i) => {
+                  const m = pick(p, tone);
+                  const before = previousSeries[i] ? pick(previousSeries[i], tone) : null;
+                  return (
+                    <tr key={p.month} className={cn(p.isFuture && 'text-muted-foreground/50')}>
+                      <th scope="row" className="px-3 py-2 text-left font-medium">{p.label}</th>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatNumber(m.itemRows)}</td>
+                      <td className="px-3 py-2 text-right font-medium tabular-nums">
+                        {formatNumber(m.visits)}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatNumber(m.qty)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatNumber(m.amount)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatNumber(m.zeroPriceRows)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+                        {before ? formatNumber(before.visits) : NO_VALUE}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
 
-        {/* Trend ----------------------------------------------------------- */}
-        {trend && trend.length > 0 && (
-          <section>
-            <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-foreground">
-              <TrendingUp className="h-4 w-4 text-muted-foreground" />
-              แนวโน้ม 12 เดือน — {metricLabel}
-            </h3>
-            <div className="h-48 w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={trend} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-                  <defs>
-                    <linearGradient id="detailFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop
-                        offset="0%"
-                        stopColor="hsl(var(--chart-1))"
-                        stopOpacity={0.28}
-                      />
-                      <stop
-                        offset="100%"
-                        stopColor="hsl(var(--chart-1))"
-                        stopOpacity={0.02}
-                      />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid
-                    strokeDasharray="3 3"
-                    stroke="hsl(var(--border))"
-                    vertical={false}
-                  />
-                  <XAxis
-                    dataKey="label"
-                    tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
-                    axisLine={false}
-                    tickLine={false}
-                  />
-                  <YAxis
-                    tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
-                    axisLine={false}
-                    tickLine={false}
-                    width={52}
-                    tickFormatter={(v: number) => formatNumber(v)}
-                  />
-                  <Tooltip
-                    formatter={(v) => [formatMetric(Number(v)), metricLabel]}
-                    contentStyle={{
-                      borderRadius: 12,
-                      border: '1px solid hsl(var(--border))',
-                      fontSize: 12,
-                    }}
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey={trendMetric}
-                    stroke="hsl(var(--chart-1))"
-                    strokeWidth={2}
-                    fill="url(#detailFill)"
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-          </section>
-        )}
-
-        {children}
-
-        {/* Recent records --------------------------------------------------- */}
-        {records && records.length > 0 && (
-          <section>
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <h3 className="text-sm font-semibold text-foreground">
-                {recordsTitle}{' '}
-                <span className="font-normal text-muted-foreground">
-                  ({formatNumber(records.length)})
-                </span>
-              </h3>
-              {onExportCsv && (
-                <button
-                  type="button"
-                  onClick={onExportCsv}
-                  className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium transition-colors hover:bg-muted"
-                >
-                  <Download className="h-3.5 w-3.5" />
-                  ดาวน์โหลด CSV
-                </button>
-              )}
-            </div>
-
-            <ul className="divide-y divide-border/60 overflow-hidden rounded-xl border border-border/60">
-              {records.map((rec) => (
-                <li key={rec.id}>
-                  <button
-                    type="button"
-                    onClick={rec.onClick}
-                    className={cn(
-                      'flex w-full items-center justify-between gap-4 px-4 py-2.5 text-left',
-                      rec.onClick
-                        ? 'cursor-pointer transition-colors hover:bg-muted/40'
-                        : 'cursor-default',
-                    )}
-                  >
-                    <span className="min-w-0">
-                      <span className="block truncate text-sm font-medium">
-                        {rec.primary}
-                      </span>
-                      <span className="block truncate text-xs text-muted-foreground">
-                        {rec.secondary}
-                      </span>
-                    </span>
-                    <span className="shrink-0 text-right">
-                      <span className="block text-xs tabular-nums text-muted-foreground">
-                        {formatThaiDate(rec.date)}
-                        {rec.time ? ` · ${formatTime(rec.time)}` : ''}
-                      </span>
-                      {rec.amount !== undefined && (
-                        <span className="block text-sm font-medium tabular-nums">
-                          {formatBaht(rec.amount)}
-                        </span>
-                      )}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
-
-        {/* Footer ----------------------------------------------------------- */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/60 pt-4">
-          {onResetFilter ? (
-            <button
-              type="button"
-              onClick={onResetFilter}
-              className="cursor-pointer rounded-lg border border-border px-3 py-1.5 text-sm font-medium transition-colors hover:bg-muted"
-            >
-              ล้างตัวกรอง
-            </button>
-          ) : (
-            <span />
-          )}
+        <div className="flex justify-end border-t border-border/60 pt-4">
           <button
             type="button"
             onClick={() => onOpenChange(false)}
-            className="cursor-pointer rounded-lg bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
+            className="cursor-pointer rounded-xl bg-primary px-5 py-2 text-sm font-medium text-primary-foreground shadow-sm transition-opacity hover:opacity-90"
           >
             ปิด
           </button>
         </div>
       </DialogContent>
     </Dialog>
-  );
-}
-
-/** Row of label/value pairs used inside a modal's extra content. */
-export function DetailFacts({
-  items,
-}: {
-  items: ReadonlyArray<{ label: string; value: string }>;
-}) {
-  return (
-    <dl className="grid gap-x-6 gap-y-2 sm:grid-cols-2">
-      {items.map((item) => (
-        <div key={item.label} className="flex justify-between gap-3 text-sm">
-          <dt className="text-muted-foreground">{item.label}</dt>
-          <dd className="font-medium tabular-nums">{item.value}</dd>
-        </div>
-      ))}
-    </dl>
-  );
-}
-
-/** Share list used when a KPI's makeup matters more than its total. */
-export function ShareList({
-  items,
-}: {
-  items: ReadonlyArray<{ label: string; visits: number; percent: number }>;
-}) {
-  return (
-    <ul className="space-y-2.5">
-      {items.map((item) => (
-        <li key={item.label}>
-          <div className="mb-1 flex items-baseline justify-between gap-3 text-sm">
-            <span className="truncate">{item.label}</span>
-            <span className="shrink-0 tabular-nums text-muted-foreground">
-              {formatNumber(item.visits)} · {formatPercent(item.percent)}
-            </span>
-          </div>
-          <ProportionBar percent={item.percent} />
-        </li>
-      ))}
-    </ul>
   );
 }

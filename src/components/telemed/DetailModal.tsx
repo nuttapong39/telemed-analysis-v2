@@ -127,7 +127,7 @@ export function DetailModal({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] max-w-3xl gap-6 overflow-y-auto rounded-2xl border-border/70 p-6 sm:p-7">
+      <DialogContent className="max-h-[90vh] grid-cols-[minmax(0,1fr)] gap-6 overflow-y-auto rounded-2xl sm:max-w-3xl border-border/70 p-6 sm:p-7">
         <DialogHeader className="text-left">
           <div className="flex items-center gap-3">
             <span className={cn('grid h-11 w-11 shrink-0 place-items-center rounded-2xl', visual.tile)}>

@@ -51,7 +51,7 @@ export function TelemedHero({ fiscalYear }: { fiscalYear: number }) {
 
           <p className="mt-2 flex flex-wrap items-center gap-x-2 text-sm text-muted-foreground">
             <span className="font-medium text-primary">ปีงบประมาณ {fiscalYear}</span>
-            <span aria-hidden="true" className="h-1 w-1 rounded-full bg-border" />
+            <span aria-hidden="true" className="hidden h-1 w-1 rounded-full bg-border sm:inline-block" />
             <span>
               {formatThaiDate(start)} – {formatThaiDate(end)}
             </span>

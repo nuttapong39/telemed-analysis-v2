@@ -15,6 +15,7 @@ import {
   clearApiQueue,
   detectDatabaseType,
   probeLocalApi,
+  resolveHstsSafeApiUrl,
 } from '@/services/bmsSession'
 import { apiQueue } from '@/services/apiQueue'
 import {
@@ -74,7 +75,18 @@ export function useBmsSession(): UseBmsSessionResult {
         )
       }
 
-      const remoteConfig = extractConnectionConfig(response)
+      const extractedConfig = extractConnectionConfig(response)
+
+      // The tunnel host lives on the HSTS preload list, so the browser rewrites
+      // `http://host:port` to `https://host:port` — where the API listener
+      // speaks plain http only. Rebuild the origin as an IP, which HSTS leaves
+      // alone, so the request reaches the listener instead of dying on a
+      // cross-scheme redirect. Falls back to the hostname when DoH is blocked.
+      const hstsSafeUrl = await resolveHstsSafeApiUrl(extractedConfig.apiUrl)
+      const remoteConfig: ConnectionConfig = hstsSafeUrl
+        ? { ...extractedConfig, apiUrl: hstsSafeUrl }
+        : extractedConfig
+
       const userInfo = extractUserInfo(response)
       const systemInfo = extractSystemInfo(response)
 

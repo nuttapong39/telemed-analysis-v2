@@ -14,6 +14,11 @@ import {
   detectDatabaseType,
   PASTE_JSON_URL,
   APP_IDENTIFIER,
+  isHstsPreloadedHost,
+  needsHstsWorkaround,
+  resolveHostToIp,
+  resolveHstsSafeApiUrl,
+  DOH_ENDPOINT,
 } from '@/services/bmsSession';
 
 // ---------------------------------------------------------------------------
@@ -652,5 +657,168 @@ describe('BMS Session Constants', () => {
 
   it('APP_IDENTIFIER is BMS.Dashboard.React', () => {
     expect(APP_IDENTIFIER).toBe('BMS.Dashboard.React');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HSTS-safe API URL resolution
+//
+// Live root cause: the tunnel host sits on the HSTS preload list with
+// `includeSubDomains`, so a browser rewrites `http://host:42488` — the port the
+// BMS API actually listens on, plain http — into `https://host:42488`, where no
+// TLS listener exists. Chrome reports this as `[307] Internal Redirect` and the
+// preflight then fails with "Redirect is not allowed for a preflight request".
+// Rebuilding the origin as an IP sidesteps the rewrite entirely.
+// ---------------------------------------------------------------------------
+
+describe('isHstsPreloadedHost', () => {
+  it('matches a subdomain of a preloaded suffix', () => {
+    expect(isHstsPreloadedHost('11179-nuttapong.tunnel.hosxp.net')).toBe(true);
+  });
+
+  it('matches the bare preloaded domain', () => {
+    expect(isHstsPreloadedHost('hosxp.net')).toBe(true);
+  });
+
+  it('is case-insensitive and tolerates a trailing dot', () => {
+    expect(isHstsPreloadedHost('HOSXP.NET')).toBe(true);
+    expect(isHstsPreloadedHost('tunnel.hosxp.net.')).toBe(true);
+  });
+
+  it('does not match an unrelated domain', () => {
+    expect(isHstsPreloadedHost('example.com')).toBe(false);
+  });
+
+  it('does not match a lookalike suffix', () => {
+    // `not-hosxp.net` must not match `hosxp.net`.
+    expect(isHstsPreloadedHost('not-hosxp.net')).toBe(false);
+  });
+});
+
+describe('needsHstsWorkaround', () => {
+  it('flags plain http on a preloaded host', () => {
+    expect(needsHstsWorkaround('http://a.tunnel.hosxp.net:42488')).toBe(true);
+  });
+
+  it('leaves https alone', () => {
+    expect(needsHstsWorkaround('https://a.tunnel.hosxp.net')).toBe(false);
+  });
+
+  it('leaves plain http on a non-preloaded host alone', () => {
+    expect(needsHstsWorkaround('http://localhost:45011')).toBe(false);
+  });
+
+  it('is false for undefined or unparsable input', () => {
+    expect(needsHstsWorkaround(undefined)).toBe(false);
+    expect(needsHstsWorkaround('not a url')).toBe(false);
+  });
+});
+
+describe('resolveHostToIp', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('returns the first A record', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          Answer: [
+            { type: 5, data: 'alias.example.com' },
+            { type: 1, data: '203.151.166.226' },
+          ],
+        }),
+      }),
+    );
+
+    await expect(resolveHostToIp('a.tunnel.hosxp.net')).resolves.toBe('203.151.166.226');
+  });
+
+  it('queries the DoH endpoint with the hostname and an A record type', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ Answer: [{ type: 1, data: '1.2.3.4' }] }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await resolveHostToIp('a.tunnel.hosxp.net');
+
+    const called = fetchMock.mock.calls[0]?.[0] as string;
+    expect(called).toContain(DOH_ENDPOINT);
+    expect(called).toContain('name=a.tunnel.hosxp.net');
+    expect(called).toContain('type=A');
+  });
+
+  it('ignores AAAA-only answers', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ Answer: [{ type: 28, data: '::1' }] }) }),
+    );
+
+    await expect(resolveHostToIp('a.tunnel.hosxp.net')).resolves.toBeUndefined();
+  });
+
+  it('returns undefined when the lookup fails', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
+
+    await expect(resolveHostToIp('a.tunnel.hosxp.net')).resolves.toBeUndefined();
+  });
+
+  it('returns undefined on a non-OK response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false }));
+
+    await expect(resolveHostToIp('a.tunnel.hosxp.net')).resolves.toBeUndefined();
+  });
+});
+
+describe('resolveHstsSafeApiUrl', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('rewrites host to IP, preserving scheme and port', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ Answer: [{ type: 1, data: '203.151.166.226' }] }) }),
+    );
+
+    await expect(
+      resolveHstsSafeApiUrl('http://a.tunnel.hosxp.net:42488'),
+    ).resolves.toBe('http://203.151.166.226:42488');
+  });
+
+  it('passes through an already-safe URL without a lookup', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(resolveHstsSafeApiUrl('https://example.com')).resolves.toBe(
+      'https://example.com',
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the hostname when DoH is unavailable', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('blocked')));
+
+    await expect(
+      resolveHstsSafeApiUrl('http://a.tunnel.hosxp.net:42488'),
+    ).resolves.toBe('http://a.tunnel.hosxp.net:42488');
+  });
+
+  it('keeps the URL unchanged when it has no port', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ Answer: [{ type: 1, data: '1.2.3.4' }] }) }),
+    );
+
+    await expect(resolveHstsSafeApiUrl('http://a.tunnel.hosxp.net')).resolves.toBe(
+      'http://1.2.3.4',
+    );
+  });
+
+  it('returns undefined for undefined input', async () => {
+    await expect(resolveHstsSafeApiUrl(undefined)).resolves.toBeUndefined();
   });
 });

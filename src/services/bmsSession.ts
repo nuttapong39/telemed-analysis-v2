@@ -72,6 +72,25 @@ export const LOCAL_API_URL = 'http://127.0.0.1:45011';
 export const LOCAL_PROBE_TIMEOUT_MS = 3_000;
 
 /**
+ * DoH resolver used to turn a tunnel hostname into an IP.
+ *
+ * `dns.google` returns CORS-enabled JSON, so this works from the browser
+ * without a proxy or a build-time DNS lookup.
+ */
+export const DOH_ENDPOINT = 'https://dns.google/resolve';
+
+/** Timeout (ms) for the DoH lookup — must not stall the connect flow. */
+export const HOST_RESOLVE_TIMEOUT_MS = 4_000;
+
+/**
+ * Host suffixes that sit on the HSTS preload list with `includeSubDomains`.
+ *
+ * For these, a browser rewrites `http://sub.host` to `https://sub.host`
+ * before the first request, which breaks the plain-http BMS port listener.
+ */
+export const HSTS_PRELOADED_SUFFIXES = ['hosxp.net'];
+
+/**
  * Append a unique `&random=...` query param to an API URL so no intermediate
  * proxy, tunnel, or browser cache can short-circuit the request with a stale
  * response. Uses `?` when the URL has no query string yet, `&` otherwise.
@@ -181,6 +200,98 @@ export function resolveApiUrl(
   } catch {
     // Unparsable URL — fall back to the raw value rather than losing it.
     return bmsUrl;
+  }
+}
+
+/**
+ * Whether `hostname` sits under an HSTS-preloaded suffix.
+ *
+ * @example isHstsPreloadedHost('a.b.hosxp.net') // true
+ * @example isHstsPreloadedHost('example.com')   // false
+ */
+export function isHstsPreloadedHost(hostname: string): boolean {
+  const bare = hostname.replace(/\.$/, '').toLowerCase();
+  return HSTS_PRELOADED_SUFFIXES.some(
+    (suffix) => bare === suffix || bare.endsWith(`.${suffix}`),
+  );
+}
+
+/**
+ * Whether `url` is a plain-http endpoint on an HSTS-preloaded host.
+ *
+ * This is the shape that needs {@link resolveHstsSafeApiUrl}: the browser
+ * rewrites it to https and reachability is lost.
+ */
+export function needsHstsWorkaround(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' && isHstsPreloadedHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve a hostname to its first A record via DNS-over-HTTPS.
+ *
+ * @returns The IPv4 address, or `undefined` when the lookup fails, is empty,
+ *          or does not finish inside {@link HOST_RESOLVE_TIMEOUT_MS}.
+ */
+export async function resolveHostToIp(
+  hostname: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), HOST_RESOLVE_TIMEOUT_MS);
+  const abort = () => controller.abort();
+  signal?.addEventListener('abort', abort);
+
+  try {
+    const url = `${DOH_ENDPOINT}?name=${encodeURIComponent(hostname)}&type=A`;
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) return undefined;
+
+    const payload = (await response.json()) as {
+      Answer?: Array<{ type?: number; data?: string }>;
+    };
+    // type 1 === A record; ignore CNAME chains and IPv6 answers.
+    const record = payload.Answer?.find(
+      (a) => a.type === 1 && typeof a.data === 'string' && /^\d+\.\d+\.\d+\.\d+$/.test(a.data),
+    );
+    return record?.data;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timeoutId);
+    signal?.removeEventListener('abort', abort);
+  }
+}
+
+/**
+ * Rebuild a plain-http API URL as `http://{ip}:{port}`.
+ *
+ * The IP form is exempt from HSTS, so the browser issues a genuinely plain
+ * request to the port listener instead of upgrading it to https. The `Host`
+ * header still carries the original hostname, so virtual-host routing is
+ * unaffected.
+ *
+ * @returns The IP-based URL, or the input unchanged when it is already safe
+ *          or the host cannot be resolved.
+ */
+export async function resolveHstsSafeApiUrl(
+  apiUrl: string | undefined,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  if (!needsHstsWorkaround(apiUrl) || !apiUrl) return apiUrl;
+
+  try {
+    const parsed = new URL(apiUrl);
+    const ip = await resolveHostToIp(parsed.hostname, signal);
+    if (!ip) return apiUrl;
+    return `${parsed.protocol}//${ip}${parsed.port ? `:${parsed.port}` : ''}`;
+  } catch {
+    return apiUrl;
   }
 }
 

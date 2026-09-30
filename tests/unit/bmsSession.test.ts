@@ -179,6 +179,60 @@ describe('extractConnectionConfig', () => {
     expect(config.databaseType).toBe('mysql');
   });
 
+  // -------------------------------------------------------------------------
+  // bms_session_port handling
+  //
+  // The tunnel's :443 listener is not always the port the session's API
+  // answers on, and the port named by bms_session_port speaks plain http.
+  // -------------------------------------------------------------------------
+
+  it('rebuilds apiUrl as http://host:port when a non-443 port is given', () => {
+    const response = createSampleResponse();
+    if (response.result?.user_info) {
+      response.result.user_info.bms_session_port = 37903;
+    }
+
+    const config = extractConnectionConfig(response);
+
+    // Host preserved, scheme forced to http, port applied.
+    expect(config.apiUrl).toBe('http://bms.hospital.com:37903');
+  });
+
+  it('leaves apiUrl untouched when the port is the default 443', () => {
+    const response = createSampleResponse();
+    if (response.result?.user_info) {
+      response.result.user_info.bms_session_port = 443;
+    }
+
+    expect(extractConnectionConfig(response).apiUrl).toBe(
+      'https://bms.hospital.com',
+    );
+  });
+
+  it('leaves apiUrl untouched when no port is supplied', () => {
+    const response = createSampleResponse();
+    if (response.result?.user_info) {
+      response.result.user_info.bms_session_port = undefined;
+    }
+
+    expect(extractConnectionConfig(response).apiUrl).toBe(
+      'https://bms.hospital.com',
+    );
+  });
+
+  it('replaces an existing port rather than appending a second one', () => {
+    const response = createSampleResponse();
+    if (response.result?.user_info) {
+      response.result.user_info.bms_url = 'https://bms.hospital.com:8443';
+      response.result.user_info.bms_session_port = 37903;
+    }
+
+    // The port from bms_session_port wins; the stale port is replaced.
+    expect(extractConnectionConfig(response).apiUrl).toBe(
+      'http://bms.hospital.com:37903',
+    );
+  });
+
   it('falls back to key_value when bms_session_code is missing', () => {
     const response = createSampleResponse();
     // Remove bms_session_code

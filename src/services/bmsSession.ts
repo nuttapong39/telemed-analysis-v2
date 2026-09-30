@@ -152,6 +152,39 @@ export async function retrieveBmsSession(sessionId: string): Promise<BmsSessionR
 // ---------------------------------------------------------------------------
 
 /**
+ * Build the API base URL from a session's `bms_url` + `bms_session_port`.
+ *
+ * `bms_url` points at the tunnel's default :443 listener, which is not always
+ * the port the session's API actually answers on — the real listener is named
+ * separately by `bms_session_port`, and it speaks **plain http**. When a port
+ * is present we therefore rebuild the origin as `http://{host}:{port}`.
+ *
+ * The scheme is forced to `http` on purpose: `bms_url` is usually `https://`,
+ * but the port listener rejects TLS (`https://host:37903` → connection error)
+ * while `http://host:37903` succeeds. Port 443 is left alone so a
+ * `https://host` tunnel keeps working unchanged.
+ *
+ * @returns The base URL, or `undefined` when `bms_url` is missing/unparsable.
+ */
+export function resolveApiUrl(
+  bmsUrl: string | undefined,
+  bmsPort: number | undefined,
+): string | undefined {
+  if (!bmsUrl) return undefined;
+
+  // Without a port (or the standard https port) keep the tunnel URL as-is.
+  if (!bmsPort || bmsPort === 443) return bmsUrl;
+
+  try {
+    const parsed = new URL(bmsUrl);
+    return `http://${parsed.hostname}:${bmsPort}`;
+  } catch {
+    // Unparsable URL — fall back to the raw value rather than losing it.
+    return bmsUrl;
+  }
+}
+
+/**
  * Build a {@link ConnectionConfig} from the raw session response.
  *
  * @throws {Error} When required fields (API URL, bearer token) are missing.
@@ -159,7 +192,7 @@ export async function retrieveBmsSession(sessionId: string): Promise<BmsSessionR
 export function extractConnectionConfig(response: BmsSessionResponse): ConnectionConfig {
   const userInfo = response.result?.user_info;
 
-  const apiUrl = userInfo?.bms_url;
+  const apiUrl = resolveApiUrl(userInfo?.bms_url, userInfo?.bms_session_port);
   if (!apiUrl) {
     throw new Error(
       'BMS API URL is missing from the session response. ' +

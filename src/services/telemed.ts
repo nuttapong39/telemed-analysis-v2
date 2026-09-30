@@ -1,105 +1,93 @@
 // =============================================================================
-// Telemedicine Dashboard - Query + Aggregation Service
+// Telemedicine Dashboard - Monthly Service Summary
 //
 // Two responsibilities, deliberately kept apart:
-//   1. Build the one SQL statement that pulls the raw telemedicine visit lines
-//      for a date window.
-//   2. Reduce those rows, entirely client-side, into everything the dashboard
-//      renders — totals, monthly series, payer mix, service mix, deltas, CSV.
+//   1. Build the summary queries: one row per (month × service), plus a
+//      per-month distinct-visit total across services.
+//   2. Reduce those rows, entirely client-side, into fiscal-year series,
+//      year-to-date sums and the CSV export.
 //
-// All reduction functions are pure so they are cheap to unit-test and safe to
-// re-run on every filter change without another round trip.
+// The dashboard reads monthly aggregates only — never patient-level rows.
+// All reduction functions are pure so they are cheap to unit-test.
 // =============================================================================
 
-import {
-  format,
-  parseISO,
-  startOfMonth,
-  subMonths,
-  subDays,
-  differenceInCalendarDays,
-} from 'date-fns';
+import { addMonths, format, parseISO } from 'date-fns';
 import { th } from 'date-fns/locale';
 import type { SqlParams } from '@/types';
 
 // ---------------------------------------------------------------------------
-// Domain constants
+// Services
 // ---------------------------------------------------------------------------
 
-/** The three HOSxP `nondrugitems.icode` values that make up telemedicine. */
-export const TELEMED_ICODES = ['3002416', '3002487', '3002488'] as const;
+export type ServiceKey = 'b2b' | 'b2c' | 'telehealth';
 
-/** The telehealth service whose cost trend gets its own chart. */
-export const TELEHEALTH_ICODE = '3002416';
+export interface TelemedService {
+  key: ServiceKey;
+  icode: string;
+  label: string;
+  /** One-line meaning shown under the label. */
+  description: string;
+}
 
-/** How many months of history the charts always want to show. */
-export const TREND_MONTHS = 12;
+/** The three telemedicine services, in display order. */
+export const TELEMED_SERVICES: readonly TelemedService[] = [
+  { key: 'b2b', icode: '3002487', label: 'B2B', description: 'บริการร่วมกับ รพ.สต.' },
+  { key: 'b2c', icode: '3002488', label: 'B2C', description: 'คนไข้โดยตรงผ่านวิดีโอคอล/แอป' },
+  { key: 'telehealth', icode: '3002416', label: 'Telehealth', description: 'โทรทางไกลผ่านมือถือ' },
+];
 
-/** Shown when a visit has no payer type recorded. */
-const UNKNOWN_PTTYPE = 'ไม่ระบุสิทธิ';
+export const TELEMED_ICODES: readonly string[] = TELEMED_SERVICES.map((s) => s.icode);
+
+const SERVICE_BY_ICODE = new Map(TELEMED_SERVICES.map((s) => [s.icode, s]));
+
+/** Upper bound on summary rows: 24 months × 3 services, with headroom. */
+const SUMMARY_LIMIT = 1000;
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-/** One raw row as delivered by `/api/sql` (snake_case, stringly-typed). */
-export interface TelemedRawRow {
-  vn?: unknown;
-  hn?: unknown;
-  vstdate?: unknown;
-  vsttime?: unknown;
-  icode?: unknown;
-  service_name?: unknown;
-  pttype_name?: unknown;
-  sum_price?: unknown;
-  pname?: unknown;
-  fname?: unknown;
-  lname?: unknown;
-}
-
-/** A normalised visit line. */
-export interface TelemedRow {
-  vn: string;
-  hn: string;
-  /** `yyyy-MM-dd` */
-  vstdate: string;
-  vsttime: string;
-  icode: string;
-  serviceName: string;
-  pttypeName: string;
-  sumPrice: number;
-  pname: string;
-  fname: string;
-  lname: string;
-}
-
-export interface MonthPoint {
-  /** `yyyy-MM` — stable sort key. */
+/** One (month × service) summary row, normalised. */
+export interface MonthlyServiceRow {
+  /** `yyyy-MM` */
   month: string;
-  /** Thai label, e.g. `ส.ค. 2569`. */
-  label: string;
-  visits: number;
-  cost: number;
-}
-
-export interface PttypePoint {
-  pttypeName: string;
-  visits: number;
-  cost: number;
-  percent: number;
-}
-
-export interface ServicePoint {
   icode: string;
   serviceName: string;
+  itemRows: number;
   visits: number;
-  cost: number;
-  percent: number;
+  qty: number;
+  amount: number;
+  zeroPriceRows: number;
 }
 
-export interface FetchWindow {
-  fetchStart: string;
-  fetchEnd: string;
+/** Distinct visits in a month across all three services. */
+export interface MonthlyTotalRow {
+  month: string;
+  visits: number;
+}
+
+export interface Metrics {
+  itemRows: number;
+  visits: number;
+  qty: number;
+  amount: number;
+  zeroPriceRows: number;
+}
+
+export interface FiscalMonthPoint {
+  /** `yyyy-MM` */
+  month: string;
+  /** `ต.ค. 68` */
+  label: string;
+  /** The month has not started yet. */
+  isFuture: boolean;
+  services: Record<ServiceKey, Metrics>;
+  total: Metrics;
+}
+
+export interface SeriesSummary {
+  services: Record<ServiceKey, Metrics>;
+  total: Metrics;
 }
 
 // ---------------------------------------------------------------------------
@@ -127,19 +115,80 @@ function num(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-/** Keep only the calendar-date portion of a possibly-datetime value. */
-function toIsoDate(value: unknown): string {
-  const raw = str(value);
-  if (raw === '') return '';
-  // `2026-09-01T00:00:00.000Z` → `2026-09-01`
-  return raw.slice(0, 10);
+/** Build `yyyy-MM` from `year_month`, or from separate EXTRACT columns. */
+function toMonth(raw: Record<string, unknown>): string {
+  const preformatted = str(raw.year_month);
+  if (/^\d{4}-\d{2}$/.test(preformatted)) return preformatted;
+
+  const year = Math.trunc(num(raw.yr));
+  const month = Math.trunc(num(raw.mon));
+  if (year < 1900 || month < 1 || month > 12) return '';
+  return `${year}-${String(month).padStart(2, '0')}`;
 }
 
-/** `2026-08` → `ส.ค. 2569` (Buddhist era). */
-function monthLabel(month: string): string {
-  const parsed = parseISO(`${month}-01`);
-  const buddhistYear = parsed.getFullYear() + 543;
-  return `${format(parsed, 'MMM', { locale: th })} ${buddhistYear}`;
+function emptyMetrics(): Metrics {
+  return { itemRows: 0, visits: 0, qty: 0, amount: 0, zeroPriceRows: 0 };
+}
+
+function emptyServices(): Record<ServiceKey, Metrics> {
+  return { b2b: emptyMetrics(), b2c: emptyMetrics(), telehealth: emptyMetrics() };
+}
+
+function addInto(target: Metrics, source: Metrics): void {
+  target.itemRows += source.itemRows;
+  target.visits += source.visits;
+  target.qty += source.qty;
+  target.amount += source.amount;
+  target.zeroPriceRows += source.zeroPriceRows;
+}
+
+// ---------------------------------------------------------------------------
+// Fiscal year (Buddhist era, 1 Oct – 30 Sep)
+// ---------------------------------------------------------------------------
+
+const BE_OFFSET = 543;
+/** October, as a 0-based JS month. */
+const FISCAL_START_MONTH = 9;
+
+/** The fiscal year (BE) that `date` falls in. */
+export function fiscalYearOf(date: Date): number {
+  const ceYear = date.getMonth() >= FISCAL_START_MONTH ? date.getFullYear() + 1 : date.getFullYear();
+  return ceYear + BE_OFFSET;
+}
+
+/** First and last day of a fiscal year, `yyyy-MM-dd`. */
+export function fiscalYearRange(fiscalYear: number): { start: string; end: string } {
+  const endCe = fiscalYear - BE_OFFSET;
+  return { start: `${endCe - 1}-10-01`, end: `${endCe}-09-30` };
+}
+
+/** The twelve `yyyy-MM` months of a fiscal year, October first. */
+export function fiscalMonths(fiscalYear: number): string[] {
+  const first = parseISO(fiscalYearRange(fiscalYear).start);
+  return Array.from({ length: 12 }, (_, i) => format(addMonths(first, i), 'yyyy-MM'));
+}
+
+/** `2025-10` → `ต.ค. 68`. */
+export function fiscalMonthLabel(month: string): string {
+  const date = parseISO(`${month}-01`);
+  const shortYear = String(date.getFullYear() + BE_OFFSET).slice(-2);
+  return `${format(date, 'MMM', { locale: th })} ${shortYear}`;
+}
+
+/** Selectable fiscal years, newest first. */
+export function fiscalYearOptions(current: number, count = 5): number[] {
+  return Array.from({ length: count }, (_, i) => current - i);
+}
+
+/**
+ * How many months of `fiscalYear` have started by `today` (0–12).
+ *
+ * Used to compare year-to-date against the same months of the prior year, so
+ * an in-progress year is never measured against a full one.
+ */
+export function elapsedMonths(fiscalYear: number, today: Date): number {
+  const current = format(today, 'yyyy-MM');
+  return fiscalMonths(fiscalYear).filter((m) => m <= current).length;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,58 +196,67 @@ function monthLabel(month: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * The single query backing the whole dashboard.
- *
- * Returns one row per `opitemrece` line so the caller can sum cost exactly and
- * still collapse to distinct visits with {@link distinctVisits}. The date range
- * is bound as `:start_date` / `:end_date` — never interpolated.
- *
- * `pttype` and `nondrugitems` are LEFT JOINed so a visit whose payer or service
- * row is missing still contributes instead of vanishing from the totals.
- *
- * There is no void filter: this schema has no `ovst.void_staff`, and `ovstost`
- * only ever holds 99/98/NULL for these rows, so filtering on it changes
- * nothing. That was verified against the live database, not assumed.
+ * Date bindings covering the selected fiscal year and the one before it, so a
+ * single fetch serves both the chart and the year-over-year comparison.
  */
-export function buildTelemedSql(): string {
-  const icodes = TELEMED_ICODES.map((code) => `'${code}'`).join(', ');
+export function buildTelemedFetchParams(fiscalYear: number): SqlParams {
+  return {
+    start_date: { value: fiscalYearRange(fiscalYear - 1).start, value_type: 'date' },
+    end_date: { value: fiscalYearRange(fiscalYear).end, value_type: 'date' },
+  };
+}
 
+function icodeList(): string {
+  return TELEMED_ICODES.map((code) => `'${code}'`).join(', ');
+}
+
+/**
+ * One row per (month × service).
+ *
+ * Year and month are grouped with `EXTRACT`, which PostgreSQL and MySQL both
+ * support, and joined into `yyyy-MM` client-side — `TO_CHAR` is PostgreSQL-only.
+ */
+export function buildTelemedMonthlySql(): string {
   return [
     'SELECT',
-    '  oi.vn          AS vn,',
-    '  o.hn           AS hn,',
-    '  o.vstdate      AS vstdate,',
-    '  o.vsttime      AS vsttime,',
-    '  oi.icode       AS icode,',
-    '  n.name         AS service_name,',
-    '  pt.name        AS pttype_name,',
-    '  oi.sum_price   AS sum_price,',
-    '  p.pname        AS pname,',
-    '  p.fname        AS fname,',
-    '  p.lname        AS lname',
-    'FROM opitemrece oi',
-    'JOIN ovst o        ON o.vn = oi.vn',
-    'JOIN patient p     ON p.hn = o.hn',
-    'LEFT JOIN nondrugitems n ON n.icode = oi.icode',
-    'LEFT JOIN pttype pt      ON pt.pttype = o.pttype',
-    `WHERE oi.icode IN (${icodes})`,
+    '  EXTRACT(YEAR FROM o.vstdate)  AS yr,',
+    '  EXTRACT(MONTH FROM o.vstdate) AS mon,',
+    '  n.icode                       AS icode,',
+    '  n.name                        AS service_name,',
+    '  COUNT(*)                      AS item_rows,',
+    '  COUNT(DISTINCT o.vn)          AS visit_count,',
+    '  SUM(o.qty)                    AS total_qty,',
+    '  SUM(o.sum_price)              AS total_amount,',
+    '  SUM(CASE WHEN o.unitprice = 0 THEN 1 ELSE 0 END) AS zero_price_rows',
+    'FROM opitemrece o',
+    'JOIN nondrugitems n ON o.icode = n.icode',
+    `WHERE o.icode IN (${icodeList()})`,
     '  AND o.vstdate BETWEEN :start_date AND :end_date',
-    'ORDER BY o.vstdate ASC, o.vsttime ASC, oi.vn ASC',
-    'LIMIT 50000',
+    'GROUP BY EXTRACT(YEAR FROM o.vstdate), EXTRACT(MONTH FROM o.vstdate), n.icode, n.name',
+    'ORDER BY yr, mon, icode',
+    `LIMIT ${SUMMARY_LIMIT}`,
   ].join('\n');
 }
 
 /**
- * Bindings for {@link buildTelemedSql}.
+ * Distinct visits per month across all three services.
  *
- * @param start - `yyyy-MM-dd`, inclusive.
- * @param end - `yyyy-MM-dd`, inclusive.
+ * A visit that carries two telemedicine codes appears once per service in
+ * {@link buildTelemedMonthlySql}; this keeps the all-services total exact.
  */
-export function buildTelemedParams(start: string, end: string): SqlParams {
-  return {
-    start_date: { value: start, value_type: 'date' },
-    end_date: { value: end, value_type: 'date' },
-  };
+export function buildTelemedMonthlyTotalSql(): string {
+  return [
+    'SELECT',
+    '  EXTRACT(YEAR FROM o.vstdate)  AS yr,',
+    '  EXTRACT(MONTH FROM o.vstdate) AS mon,',
+    '  COUNT(DISTINCT o.vn) AS visit_count',
+    'FROM opitemrece o',
+    `WHERE o.icode IN (${icodeList()})`,
+    '  AND o.vstdate BETWEEN :start_date AND :end_date',
+    'GROUP BY EXTRACT(YEAR FROM o.vstdate), EXTRACT(MONTH FROM o.vstdate)',
+    'ORDER BY yr, mon',
+    `LIMIT ${SUMMARY_LIMIT}`,
+  ].join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -206,229 +264,111 @@ export function buildTelemedParams(start: string, end: string): SqlParams {
 // ---------------------------------------------------------------------------
 
 /**
- * Normalise raw API rows into typed {@link TelemedRow}s.
+ * Normalise raw monthly summary rows.
  *
- * Rows without a `vn` are dropped — without one there is nothing to dedupe on.
+ * Rows without a valid month, or for an icode outside the three services, are
+ * dropped rather than guessed at.
  */
-export function normalizeTelemedRows(
+export function normalizeMonthlyRows(
   data: readonly unknown[] | undefined,
-): TelemedRow[] {
-  if (!data || data.length === 0) return [];
+): MonthlyServiceRow[] {
+  if (!data) return [];
 
-  const rows: TelemedRow[] = [];
+  const rows: MonthlyServiceRow[] = [];
   for (const entry of data) {
-    const raw = entry as TelemedRawRow;
-    const vn = str(raw.vn);
-    if (vn === '') continue;
+    const raw = entry as Record<string, unknown>;
+    const month = toMonth(raw);
+    const icode = str(raw.icode);
+    if (month === '' || !SERVICE_BY_ICODE.has(icode)) continue;
 
     rows.push({
-      vn,
-      hn: str(raw.hn),
-      vstdate: toIsoDate(raw.vstdate),
-      vsttime: str(raw.vsttime),
-      icode: str(raw.icode),
+      month,
+      icode,
       serviceName: str(raw.service_name),
-      pttypeName: str(raw.pttype_name),
-      sumPrice: num(raw.sum_price),
-      pname: str(raw.pname),
-      fname: str(raw.fname),
-      lname: str(raw.lname),
+      itemRows: num(raw.item_rows),
+      visits: num(raw.visit_count),
+      qty: num(raw.total_qty),
+      amount: num(raw.total_amount),
+      zeroPriceRows: num(raw.zero_price_rows),
     });
   }
   return rows;
 }
 
+/** Normalise raw per-month distinct-visit totals. */
+export function normalizeMonthlyTotals(
+  data: readonly unknown[] | undefined,
+): MonthlyTotalRow[] {
+  if (!data) return [];
+
+  const rows: MonthlyTotalRow[] = [];
+  for (const entry of data) {
+    const raw = entry as Record<string, unknown>;
+    const month = toMonth(raw);
+    if (month === '') continue;
+    rows.push({ month, visits: num(raw.visit_count) });
+  }
+  return rows;
+}
+
 // ---------------------------------------------------------------------------
-// Visit-level reduction
+// Series
 // ---------------------------------------------------------------------------
 
 /**
- * Collapse item lines down to one row per visit, keeping the first seen.
+ * The twelve months of `fiscalYear`, each broken down by service.
  *
- * A `vn` can carry several `opitemrece` lines, so any headline "how many
- * visits" figure must go through here or it silently counts items instead.
+ * Months with no rows are present with zeros, so charts keep a fixed axis.
+ * The month total's visit count comes from `totals` when available, since
+ * summing per-service visits can double-count a visit billed under two codes.
  */
-export function distinctVisits(rows: readonly TelemedRow[]): TelemedRow[] {
-  const seen = new Set<string>();
-  const visits: TelemedRow[] = [];
+export function buildFiscalSeries(
+  rows: readonly MonthlyServiceRow[],
+  totals: readonly MonthlyTotalRow[],
+  fiscalYear: number,
+  today: Date,
+): FiscalMonthPoint[] {
+  const current = format(today, 'yyyy-MM');
+  const totalByMonth = new Map(totals.map((t) => [t.month, t.visits]));
+
+  const points = fiscalMonths(fiscalYear).map<FiscalMonthPoint>((month) => ({
+    month,
+    label: fiscalMonthLabel(month),
+    isFuture: month > current,
+    services: emptyServices(),
+    total: emptyMetrics(),
+  }));
+  const pointByMonth = new Map(points.map((p) => [p.month, p]));
+
   for (const r of rows) {
-    if (seen.has(r.vn)) continue;
-    seen.add(r.vn);
-    visits.push(r);
+    const point = pointByMonth.get(r.month);
+    const service = SERVICE_BY_ICODE.get(r.icode);
+    if (!point || !service) continue;
+    addInto(point.services[service.key], r);
+    addInto(point.total, r);
   }
-  return visits;
+
+  for (const point of points) {
+    const distinct = totalByMonth.get(point.month);
+    if (distinct !== undefined) point.total.visits = distinct;
+  }
+
+  return points;
 }
 
-/** Number of distinct visits. */
-export function totalVisits(rows: readonly TelemedRow[]): number {
-  return distinctVisits(rows).length;
-}
-
-/** Total cost across every item line. */
-export function totalCost(rows: readonly TelemedRow[]): number {
-  return rows.reduce((sum, r) => sum + r.sumPrice, 0);
-}
-
-// ---------------------------------------------------------------------------
-// Grouping
-// ---------------------------------------------------------------------------
-
-/**
- * Monthly visit + cost series, ascending by month.
- *
- * @param costFilter - When given, only matching rows contribute to `cost`
- *   (used to isolate the telehealth service's cost trend). Visit counts always
- *   reflect every row, since a visit is a visit whichever service it billed.
- */
-export function aggregateByMonth(
-  rows: readonly TelemedRow[],
-  costFilter?: (row: TelemedRow) => boolean,
-): MonthPoint[] {
-  const buckets = new Map<string, MonthPoint>();
-
-  const bucketFor = (month: string): MonthPoint => {
-    let bucket = buckets.get(month);
-    if (!bucket) {
-      bucket = { month, label: monthLabel(month), visits: 0, cost: 0 };
-      buckets.set(month, bucket);
+/** Sum the first `monthCount` months of a series (defaults to all of them). */
+export function summarizeSeries(
+  series: readonly FiscalMonthPoint[],
+  monthCount = series.length,
+): SeriesSummary {
+  const summary: SeriesSummary = { services: emptyServices(), total: emptyMetrics() };
+  for (const point of series.slice(0, monthCount)) {
+    for (const service of TELEMED_SERVICES) {
+      addInto(summary.services[service.key], point.services[service.key]);
     }
-    return bucket;
-  };
-
-  // A vn carries exactly one vstdate, so counting per vn is exact.
-  const counted = new Set<string>();
-  for (const r of rows) {
-    if (r.vstdate === '') continue;
-    const month = r.vstdate.slice(0, 7);
-    bucketFor(month);
-    if (counted.has(r.vn)) continue;
-    counted.add(r.vn);
-    bucketFor(month).visits += 1;
+    addInto(summary.total, point.total);
   }
-
-  for (const r of rows) {
-    if (r.vstdate === '') continue;
-    if (costFilter && !costFilter(r)) continue;
-    bucketFor(r.vstdate.slice(0, 7)).cost += r.sumPrice;
-  }
-
-  return [...buckets.values()].sort((a, b) => a.month.localeCompare(b.month));
-}
-
-/** Cost per visit, so payer/service points can attribute line totals. */
-function costByVisit(rows: readonly TelemedRow[]): Map<string, number> {
-  const totals = new Map<string, number>();
-  for (const r of rows) {
-    totals.set(r.vn, (totals.get(r.vn) ?? 0) + r.sumPrice);
-  }
-  return totals;
-}
-
-/** Payer mix, descending by visits, each with its share of total visits. */
-export function aggregateByPttype(rows: readonly TelemedRow[]): PttypePoint[] {
-  const visits = distinctVisits(rows);
-  if (visits.length === 0) return [];
-
-  const costs = costByVisit(rows);
-  const buckets = new Map<string, PttypePoint>();
-
-  for (const r of visits) {
-    const name = r.pttypeName === '' ? UNKNOWN_PTTYPE : r.pttypeName;
-    let bucket = buckets.get(name);
-    if (!bucket) {
-      bucket = { pttypeName: name, visits: 0, cost: 0, percent: 0 };
-      buckets.set(name, bucket);
-    }
-    bucket.visits += 1;
-    bucket.cost += costs.get(r.vn) ?? 0;
-  }
-
-  const total = visits.length;
-  const points = [...buckets.values()];
-  for (const p of points) p.percent = (p.visits / total) * 100;
-
-  return points.sort(
-    (a, b) => b.visits - a.visits || a.pttypeName.localeCompare(b.pttypeName),
-  );
-}
-
-/** Service mix by icode, descending by visits, each with its share. */
-export function aggregateByServiceType(rows: readonly TelemedRow[]): ServicePoint[] {
-  const visits = distinctVisits(rows);
-  if (visits.length === 0) return [];
-
-  const costs = costByVisit(rows);
-  const buckets = new Map<string, ServicePoint>();
-
-  for (const r of visits) {
-    let bucket = buckets.get(r.icode);
-    if (!bucket) {
-      bucket = {
-        icode: r.icode,
-        serviceName: r.serviceName === '' ? r.icode : r.serviceName,
-        visits: 0,
-        cost: 0,
-        percent: 0,
-      };
-      buckets.set(r.icode, bucket);
-    }
-    bucket.visits += 1;
-    bucket.cost += costs.get(r.vn) ?? 0;
-  }
-
-  const total = visits.length;
-  const points = [...buckets.values()];
-  for (const p of points) p.percent = (p.visits / total) * 100;
-
-  return points.sort((a, b) => b.visits - a.visits || a.icode.localeCompare(b.icode));
-}
-
-// ---------------------------------------------------------------------------
-// Range maths
-// ---------------------------------------------------------------------------
-
-/**
- * Widen the fetch window so the trend charts always have a full year of
- * context, even when the user picked a 7-day range.
- *
- * The requested start is never narrowed — only extended further back.
- */
-export function buildFetchWindow(start: string, end: string): FetchWindow {
-  const endDate = parseISO(end);
-  const twelveMonthsBack = startOfMonth(
-    subMonths(startOfMonth(endDate), TREND_MONTHS - 1),
-  );
-
-  const requestedStart = parseISO(start);
-  const fetchStart =
-    requestedStart < twelveMonthsBack ? requestedStart : twelveMonthsBack;
-
-  return {
-    fetchStart: format(fetchStart, 'yyyy-MM-dd'),
-    fetchEnd: format(endDate, 'yyyy-MM-dd'),
-  };
-}
-
-/**
- * The equal-length window immediately before `[start, end]`, used for the
- * "compared with previous period" deltas.
- */
-export function shiftRange(
-  start: string,
-  end: string,
-): { prevStart: string; prevEnd: string } {
-  const startDate = parseISO(start);
-  const endDate = parseISO(end);
-
-  // Inclusive length: a same-day range is 1 day, not 0.
-  const lengthDays = differenceInCalendarDays(endDate, startDate) + 1;
-  const prevEnd = subDays(startDate, 1);
-  const prevStart = subDays(prevEnd, lengthDays - 1);
-
-  return {
-    prevStart: format(prevStart, 'yyyy-MM-dd'),
-    prevEnd: format(prevEnd, 'yyyy-MM-dd'),
-  };
+  return summary;
 }
 
 /**
@@ -443,37 +383,23 @@ export function percentChange(current: number, previous: number): number | null 
 }
 
 // ---------------------------------------------------------------------------
-// Presentation helpers
+// CSV
 // ---------------------------------------------------------------------------
 
-/**
- * Human label for a visit's patient: `นาง สมศรี ใจดี (HN001)`.
- *
- * Falls back to an explicit placeholder so a blank name never renders as `()`.
- */
-export function formatPatientLabel(row: TelemedRow): string {
-  const name = [row.fname, row.lname].filter(Boolean).join(' ').trim();
-  const withPrefix = [row.pname, name].filter(Boolean).join(' ').trim();
-
-  if (withPrefix === '') {
-    return row.hn === '' ? 'ไม่ระบุชื่อ' : `ไม่ระบุชื่อ (${row.hn})`;
-  }
-  return row.hn === '' ? withPrefix : `${withPrefix} (${row.hn})`;
-}
-
-/** Columns emitted by {@link toCsv}, in order. */
-const CSV_COLUMNS: ReadonlyArray<{ header: string; get: (r: TelemedRow) => string }> =
-  [
-    { header: 'vn', get: (r) => r.vn },
-    { header: 'hn', get: (r) => r.hn },
-    { header: 'vstdate', get: (r) => r.vstdate },
-    { header: 'vsttime', get: (r) => r.vsttime },
-    { header: 'icode', get: (r) => r.icode },
-    { header: 'service_name', get: (r) => r.serviceName },
-    { header: 'pttype_name', get: (r) => r.pttypeName },
-    { header: 'sum_price', get: (r) => String(r.sumPrice) },
-    { header: 'patient', get: (r) => formatPatientLabel(r) },
-  ];
+/** Columns emitted by {@link toMonthlyCsv}, matching the summary query. */
+const CSV_COLUMNS: ReadonlyArray<{
+  header: string;
+  get: (r: MonthlyServiceRow) => string;
+}> = [
+  { header: 'year_month', get: (r) => r.month },
+  { header: 'icode', get: (r) => r.icode },
+  { header: 'service_name', get: (r) => r.serviceName },
+  { header: 'item_rows', get: (r) => String(r.itemRows) },
+  { header: 'visit_count', get: (r) => String(r.visits) },
+  { header: 'total_qty', get: (r) => String(r.qty) },
+  { header: 'total_amount', get: (r) => String(r.amount) },
+  { header: 'zero_price_rows', get: (r) => String(r.zeroPriceRows) },
+];
 
 /** RFC-4180 field escaping, with Excel's leading-quote quirk handled. */
 function csvField(value: string): string {
@@ -486,11 +412,21 @@ function csvField(value: string): string {
   return withoutMarker;
 }
 
-/** Render rows as CSV, header first. */
-export function toCsv(rows: readonly TelemedRow[]): string {
+/** The fiscal year's summary rows as CSV, ordered by month then icode. */
+export function toMonthlyCsv(rows: readonly MonthlyServiceRow[], fiscalYear: number): string {
+  const months = new Set(fiscalMonths(fiscalYear));
+  const selected = rows
+    .filter((r) => months.has(r.month))
+    .sort((a, b) => a.month.localeCompare(b.month) || a.icode.localeCompare(b.icode));
+
   const lines = [CSV_COLUMNS.map((c) => c.header).join(',')];
-  for (const r of rows) {
+  for (const r of selected) {
     lines.push(CSV_COLUMNS.map((c) => csvField(c.get(r))).join(','));
   }
   return lines.join('\n');
+}
+
+/** `telemed-fy2569.csv` */
+export function csvFilename(fiscalYear: number): string {
+  return `telemed-fy${fiscalYear}.csv`;
 }

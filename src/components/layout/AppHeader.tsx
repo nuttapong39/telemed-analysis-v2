@@ -1,5 +1,5 @@
 // =============================================================================
-// BMS Session KPI Dashboard - App Header
+// Telemed Analytics - App Header
 // Refined professional navigation with modern aesthetics
 // =============================================================================
 
@@ -25,7 +25,7 @@ interface NavTab {
 }
 
 const NAV_TABS: NavTab[] = [
-  { label: 'หน้าหลัก', path: '/', icon: LayoutDashboard },
+  { label: 'Telemed', path: '/', icon: LayoutDashboard },
 ];
 
 // ---------------------------------------------------------------------------
@@ -55,8 +55,8 @@ export function AppHeader() {
             <Activity className="h-5 w-5" />
           </div>
           <div className="brand-text">
-            <h1 className="brand-title">Template App</h1>
-            <span className="brand-subtitle">BMS Session</span>
+            <h1 className="brand-title">Telemed Analytics</h1>
+            <span className="brand-subtitle">ระบบวิเคราะห์บริการ Telemedicine</span>
           </div>
         </div>
 
@@ -79,7 +79,7 @@ export function AppHeader() {
                 className={`nav-tab ${isActive ? 'nav-tab-active' : ''}`}
               >
                 <Icon className="h-4 w-4" />
-                <span>{tab.label}</span>
+                <span className="nav-tab-label">{tab.label}</span>
                 {isActive && <span className="nav-tab-indicator" />}
               </Link>
             );
@@ -162,6 +162,7 @@ export function AppHeader() {
 
         .brand-icon {
           display: flex;
+          flex-shrink: 0;
           align-items: center;
           justify-content: center;
           width: 2.25rem;
@@ -175,6 +176,7 @@ export function AppHeader() {
         .brand-text {
           display: flex;
           flex-direction: column;
+          min-width: 0;
         }
 
         .brand-title {
@@ -184,6 +186,9 @@ export function AppHeader() {
           margin: 0;
           line-height: 1.2;
           letter-spacing: -0.01em;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
         }
 
         .brand-subtitle {
@@ -286,6 +291,7 @@ export function AppHeader() {
         }
 
         .session-divider {
+          flex-shrink: 0;
           width: 1px;
           height: 20px;
           background: rgba(255, 255, 255, 0.1);
@@ -391,6 +397,62 @@ export function AppHeader() {
 
           .disconnect-btn {
             padding: 0.5rem;
+          }
+        }
+
+        /* Narrow phones: the brand must stay on one line and the session
+           cluster must collapse to icons, otherwise the row overflows. */
+        @media (max-width: 640px) {
+          .header-inner {
+            gap: 0.5rem;
+            height: 56px;
+            padding: 0 0.75rem;
+          }
+
+          .header-brand {
+            flex: 1 1 auto;
+            min-width: 0;
+          }
+
+          .brand-subtitle {
+            display: none;
+          }
+
+          .brand-title {
+            font-size: 0.875rem;
+          }
+
+          .header-nav {
+            flex-shrink: 0;
+          }
+
+          .nav-tab {
+            padding: 0.5rem 0.625rem;
+          }
+
+          .nav-tab-label {
+            display: none;
+          }
+
+          .header-session {
+            flex-shrink: 0;
+            gap: 0.5rem;
+          }
+        }
+
+        @media (max-width: 420px) {
+          .brand-icon {
+            width: 2rem;
+            height: 2rem;
+          }
+
+          .user-info,
+          .session-user > svg {
+            display: none;
+          }
+
+          .session-user {
+            padding: 0.25rem;
           }
         }
       `}</style>

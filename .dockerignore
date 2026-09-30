@@ -1,0 +1,13 @@
+node_modules
+dist
+build
+.git
+.claude
+.specify
+specs
+docs
+tests
+coverage
+*.log
+.env*
+.DS_Store

@@ -8,7 +8,9 @@
 //                      the data, ordered by code): visits + amount, each
 //                      against the same months of the prior fiscal year
 //   4. Monthly trend - stacked bars by service, prior year as a dashed line
-//   5. Month table   - fiscal months × services
+//   5. Month table   - fiscal months × services, sortable
+//   6. Detail table  - month × service × visit type, searchable and sortable,
+//                      with the CSV export of the same rows
 //
 // One fetch per fiscal year (it covers the prior year too). Everything else —
 // series, year-to-date sums, deltas, modal contents, CSV — is derived
@@ -16,7 +18,7 @@
 // =============================================================================
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { BarChart3, Download, RefreshCw, Table2 } from 'lucide-react';
+import { BarChart3, Download, ListFilter, RefreshCw, Table2 } from 'lucide-react';
 
 import { useBmsSessionContext } from '@/contexts/BmsSessionContext';
 import { useQuery } from '@/hooks/useQuery';
@@ -40,6 +42,7 @@ import {
   normalizeMonthlyTotals,
   normalizeVisitTypeNames,
   percentChange,
+  selectFiscalYearRows,
   summarizeByVisitType,
   summarizeSeries,
   toMonthlyCsv,
@@ -59,6 +62,7 @@ import { ServiceCard } from '@/components/telemed/ServiceCard';
 import { MonthlyTrendChart } from '@/components/telemed/MonthlyTrendChart';
 import type { TrendMetric } from '@/components/telemed/MonthlyTrendChart';
 import { MonthlyTable } from '@/components/telemed/MonthlyTable';
+import { DetailDataTable } from '@/components/telemed/DetailDataTable';
 import { DetailModal } from '@/components/telemed/DetailModal';
 import { TOTAL_VISUAL, withVisuals } from '@/components/telemed/serviceTheme';
 import type { ServiceEntry } from '@/components/telemed/serviceTheme';
@@ -199,6 +203,7 @@ export default function TelemedDashboard() {
     [rows, totals, services, fiscalYear, today],
   );
   const yearSummary = useMemo(() => summarizeSeries(series), [series]);
+  const yearRows = useMemo(() => selectFiscalYearRows(rows, fiscalYear), [rows, fiscalYear]);
 
   // Compare like with like: an in-progress year against the same months of
   // the year before, never against a full year.
@@ -371,8 +376,17 @@ export default function TelemedDashboard() {
           {/* 5. Month table ------------------------------------------------ */}
           <SectionCard
             title="สรุปรายเดือน"
-            description="Visit (ตัวหนา) และจำนวนเงินเป็นบาท (ตัวเล็ก) ของแต่ละบริการ"
+            description="Visit (ตัวหนา) และจำนวนเงินเป็นบาท (ตัวเล็ก) ของแต่ละบริการ · คลิกหัวคอลัมน์เพื่อเรียง"
             icon={<Table2 className="h-5 w-5" />}
+          >
+            <MonthlyTable series={series} services={services} />
+          </SectionCard>
+
+          {/* 6. Detail table ----------------------------------------------- */}
+          <SectionCard
+            title="รายละเอียดรายบริการ"
+            description="แยกตามเดือน บริการ และประเภทการมา · ค้นหาและคลิกหัวคอลัมน์เพื่อเรียง"
+            icon={<ListFilter className="h-5 w-5" />}
             aside={
               <ToolbarButton onClick={exportCsv} className="px-2.5 py-1.5 text-xs">
                 <Download className="h-3.5 w-3.5" />
@@ -380,7 +394,7 @@ export default function TelemedDashboard() {
               </ToolbarButton>
             }
           >
-            <MonthlyTable series={series} services={services} />
+            <DetailDataTable rows={yearRows} services={services} visitTypeNames={visitTypeNames} />
           </SectionCard>
 
           <p className="pb-2 text-center text-xs text-muted-foreground">

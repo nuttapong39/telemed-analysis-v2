@@ -9,6 +9,7 @@ import { ServiceCard } from '@/components/telemed/ServiceCard'
 import { MonthlyTable } from '@/components/telemed/MonthlyTable'
 import { FiscalYearSelect } from '@/components/telemed/primitives'
 import { DetailModal } from '@/components/telemed/DetailModal'
+import { DetailDataTable } from '@/components/telemed/DetailDataTable'
 import { TOTAL_VISUAL, serviceVisual, withVisuals } from '@/components/telemed/serviceTheme'
 import { TOTAL_KEY, buildFiscalSeries, deriveServices } from '@/services/telemed'
 import type { MonthlyServiceRow } from '@/services/telemed'
@@ -188,5 +189,107 @@ describe('MonthlyTable', () => {
     render(<MonthlyTable series={series} services={services} />)
     const future = screen.getByText('ก.ย. 70').closest('tr')
     expect(future).toHaveAttribute('data-future', 'true')
+  })
+
+  it('sorts months by a column when its header is clicked, keeping the total row last', () => {
+    const sortable = buildFiscalSeries(
+      [
+        row({ month: '2025-10', icode: '3002416', visits: 2 }),
+        row({ month: '2025-11', icode: '3002416', visits: 9 }),
+        row({ month: '2025-12', icode: '3002416', visits: 5 }),
+      ],
+      [],
+      withVisuals([services[0]]),
+      2569,
+      new Date(2026, 8, 30),
+    )
+    render(<MonthlyTable series={sortable} services={withVisuals([services[0]])} />)
+    const header = screen.getByRole('columnheader', { name: 'Telehealth' })
+    expect(header).toHaveAttribute('aria-sort', 'none')
+
+    fireEvent.click(within(header).getByRole('button'))
+    expect(header).toHaveAttribute('aria-sort', 'descending')
+    const tableRows = screen.getAllByRole('row')
+    expect(within(tableRows[1]).getByRole('rowheader')).toHaveTextContent('พ.ย. 68')
+    expect(within(tableRows[2]).getByRole('rowheader')).toHaveTextContent('ธ.ค. 68')
+    expect(within(tableRows[tableRows.length - 1]).getByRole('rowheader')).toHaveTextContent('รวม')
+  })
+})
+
+describe('DetailDataTable', () => {
+  const names = new Map([
+    ['01', 'มาเอง'],
+    ['02', 'มาตามนัด'],
+  ])
+  const rows = [
+    row({ month: '2025-10', icode: '3002416', serviceName: 'Telehealth', visitTypeCode: '01', visits: 4, amount: 400 }),
+    row({ month: '2025-11', icode: '3002487', serviceName: 'B2B', visitTypeCode: '02', visits: 9, amount: 900 }),
+    row({ month: '2025-12', icode: '3002416', serviceName: 'Telehealth', visitTypeCode: '', visits: 1, amount: 100 }),
+  ]
+  const services = withVisuals(deriveServices(rows))
+
+  function bodyRows() {
+    return screen.getAllByRole('row').slice(1)
+  }
+
+  function search(text: string) {
+    fireEvent.change(screen.getByRole('searchbox', { name: 'ค้นหาในตารางรายละเอียด' }), {
+      target: { value: text },
+    })
+  }
+
+  it('lists every row of the year with a result count', () => {
+    render(<DetailDataTable rows={rows} services={services} visitTypeNames={names} />)
+    expect(bodyRows()).toHaveLength(3)
+    expect(screen.getByText('ทั้งหมด 3 แถว')).toBeInTheDocument()
+  })
+
+  it('filters by service, code, visit type or month', () => {
+    render(<DetailDataTable rows={rows} services={services} visitTypeNames={names} />)
+    search('มาตามนัด')
+    expect(bodyRows()).toHaveLength(1)
+    expect(within(bodyRows()[0]).getByText('B2B')).toBeInTheDocument()
+
+    search('3002416')
+    expect(bodyRows()).toHaveLength(2)
+
+    search('ธ.ค.')
+    expect(bodyRows()).toHaveLength(1)
+    expect(within(bodyRows()[0]).getByText('ไม่ระบุ')).toBeInTheDocument()
+    expect(screen.getByText('พบ 1 จาก 3 แถว')).toBeInTheDocument()
+  })
+
+  it('sorts by a column when its header is clicked, and announces the order', () => {
+    render(<DetailDataTable rows={rows} services={services} visitTypeNames={names} />)
+    const header = screen.getByRole('columnheader', { name: 'Visit' })
+    fireEvent.click(within(header).getByRole('button'))
+    expect(header).toHaveAttribute('aria-sort', 'descending')
+    expect(bodyRows().map((r) => within(r).getAllByRole('cell')[3].textContent)).toEqual([
+      '9',
+      '4',
+      '1',
+    ])
+
+    fireEvent.click(within(header).getByRole('button'))
+    expect(header).toHaveAttribute('aria-sort', 'ascending')
+  })
+
+  it('offers to clear a search that matches nothing', () => {
+    render(<DetailDataTable rows={rows} services={services} visitTypeNames={names} />)
+    search('ไม่มีคำนี้')
+    expect(screen.getByText('ไม่พบรายการที่ตรงกับ "ไม่มีคำนี้"')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'ล้างคำค้น' }))
+    expect(bodyRows()).toHaveLength(3)
+  })
+
+  it('pages long results 25 rows at a time', () => {
+    const many = Array.from({ length: 30 }, (_, i) =>
+      row({ icode: String(3002400 + i), serviceName: `บริการ ${i}` }),
+    )
+    render(<DetailDataTable rows={many} services={withVisuals(deriveServices(many))} visitTypeNames={names} />)
+    expect(bodyRows()).toHaveLength(25)
+    expect(screen.getByText('หน้า 1 / 2')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'หน้าถัดไป' }))
+    expect(bodyRows()).toHaveLength(5)
   })
 })

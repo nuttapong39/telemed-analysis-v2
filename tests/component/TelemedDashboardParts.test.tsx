@@ -14,13 +14,16 @@ import type { MonthlyServiceRow } from '@/services/telemed'
 function row(overrides: Partial<MonthlyServiceRow> = {}): MonthlyServiceRow {
   return {
     month: '2025-10',
+    standardCode: 'TELMED',
     icode: '3002416',
     serviceName: 'Telehealth',
+    visitTypeCode: '01',
     itemRows: 10,
     visits: 8,
     qty: 10,
     amount: 1000,
     zeroPriceRows: 2,
+    noVnRows: 0,
     ...overrides,
   }
 }

@@ -23,6 +23,7 @@ import {
   percentChange,
   toMonthlyCsv,
   csvFilename,
+  SUMMARY_LIMIT,
 } from '@/services/telemed';
 import type { MonthlyServiceRow } from '@/services/telemed';
 
@@ -33,13 +34,16 @@ import type { MonthlyServiceRow } from '@/services/telemed';
 function row(overrides: Partial<MonthlyServiceRow> = {}): MonthlyServiceRow {
   return {
     month: '2025-10',
+    standardCode: 'TELMED',
     icode: '3002416',
     serviceName: 'Telehealth',
+    visitTypeCode: '01',
     itemRows: 10,
     visits: 8,
     qty: 10,
     amount: 1000,
     zeroPriceRows: 2,
+    noVnRows: 0,
     ...overrides,
   };
 }
@@ -143,12 +147,20 @@ describe('elapsedMonths', () => {
 
 describe('buildTelemedFetchParams', () => {
   it('covers the selected fiscal year and the one before it', () => {
-    expect(buildTelemedFetchParams(2569)).toEqual({
-      start_date: { value: '2024-10-01', value_type: 'date' },
-      end_date: { value: '2026-09-30', value_type: 'date' },
-    });
+    const params = buildTelemedFetchParams(2569);
+    expect(params.start_date).toEqual({ value: '2024-10-01', value_type: 'date' });
+    expect(params.end_date).toEqual({ value: '2026-09-30', value_type: 'date' });
+  });
+
+  it('binds the TELMED standard code, ADP type 3', () => {
+    const params = buildTelemedFetchParams(2569);
+    expect(params.adp_code).toEqual({ value: 'TELMED', value_type: 'string' });
+    expect(params.adp_type_id).toEqual({ value: 3, value_type: 'integer' });
   });
 });
+
+/** Visit identity: the VN, or HN + visit date for a charge line without one. */
+const VISIT_KEY = "COALESCE(NULLIF(o.vn, ''), CONCAT(o.hn, '|', o.vstdate))";
 
 describe('buildTelemedMonthlySql', () => {
   const sql = buildTelemedMonthlySql();
@@ -161,21 +173,41 @@ describe('buildTelemedMonthlySql', () => {
 
   it('selects every summary column of the monthly service query', () => {
     for (const column of [
+      'standard_code',
+      'local_icode',
       'service_name',
+      'visit_type_code',
       'item_rows',
       'visit_count',
       'total_qty',
       'total_amount',
       'zero_price_rows',
+      'no_vn_rows',
     ]) {
       expect(sql).toContain(`AS ${column}`);
     }
-    expect(sql).toContain('COUNT(DISTINCT o.vn)');
     expect(sql).toContain('SUM(CASE WHEN o.unitprice = 0 THEN 1 ELSE 0 END)');
   });
 
-  it('filters to the three telemedicine icodes', () => {
-    for (const icode of TELEMED_ICODES) expect(sql).toContain(`'${icode}'`);
+  it('selects items by the bound TELMED standard code, not by local icodes', () => {
+    expect(sql).toContain('n.nhso_adp_code = :adp_code AND n.nhso_adp_type_id = :adp_type_id');
+    expect(sql).not.toContain("'TELMED'");
+    expect(sql).not.toMatch(/icode IN/i);
+  });
+
+  it('counts a visit by VN, falling back to HN + visit date when the line has no VN', () => {
+    expect(sql).toContain(`COUNT(DISTINCT ${VISIT_KEY}) AS visit_count`);
+    expect(sql).toContain("SUM(CASE WHEN o.vn IS NULL OR o.vn = '' THEN 1 ELSE 0 END) AS no_vn_rows");
+  });
+
+  it('left-joins the visit so lines without a VN keep their items and amount', () => {
+    expect(sql).toContain('LEFT JOIN ovst v ON v.vn = o.vn');
+    expect(sql.match(/JOIN ovst\b/g)).toHaveLength(1);
+  });
+
+  it('breaks each service down by visit type', () => {
+    expect(sql).toMatch(/v\.ovstist\s+AS visit_type_code/);
+    expect(sql).toMatch(/GROUP BY[\s\S]*v\.ovstist/);
   });
 
   it('binds the date window instead of interpolating it', () => {
@@ -191,15 +223,18 @@ describe('buildTelemedMonthlySql', () => {
 describe('buildTelemedMonthlyTotalSql', () => {
   const sql = buildTelemedMonthlyTotalSql();
 
-  it('counts distinct visits per month across all three services', () => {
-    expect(sql).toContain('COUNT(DISTINCT o.vn) AS visit_count');
+  it('counts distinct visits per month and visit type across all services', () => {
+    expect(sql).toContain(`COUNT(DISTINCT ${VISIT_KEY}) AS visit_count`);
     expect(sql).toContain('EXTRACT(MONTH FROM o.vstdate)');
+    expect(sql).toMatch(/v\.ovstist\s+AS visit_type_code/);
     expect(sql).not.toMatch(/GROUP BY[^;]*icode/);
   });
 
-  it('binds the same date window', () => {
-    expect(sql).toContain(':start_date');
-    expect(sql).toContain(':end_date');
+  it('uses the same TELMED filter, join and date window as the service query', () => {
+    expect(sql).toContain('n.nhso_adp_code = :adp_code AND n.nhso_adp_type_id = :adp_type_id');
+    expect(sql).toContain('LEFT JOIN ovst v ON v.vn = o.vn');
+    expect(sql).toContain('o.vstdate BETWEEN :start_date AND :end_date');
+    expect(sql).toMatch(/LIMIT \d+/);
   });
 });
 
@@ -213,25 +248,47 @@ describe('normalizeMonthlyRows', () => {
       {
         yr: '2025',
         mon: '9',
-        icode: '3002487',
+        standard_code: 'TELMED',
+        local_icode: '3002487',
         service_name: ' B2B รพ.สต. ',
+        visit_type_code: ' 01 ',
         item_rows: '12',
         visit_count: '10',
         total_qty: '12.00',
         total_amount: '1,500.50',
         zero_price_rows: '3',
+        no_vn_rows: '2',
       },
     ]);
     expect(r).toEqual({
       month: '2025-09',
+      standardCode: 'TELMED',
       icode: '3002487',
       serviceName: 'B2B รพ.สต.',
+      visitTypeCode: '01',
       itemRows: 12,
       visits: 10,
       qty: 12,
       amount: 1500.5,
       zeroPriceRows: 3,
+      noVnRows: 2,
     });
+  });
+
+  it('leaves the visit type blank for lines with no visit record', () => {
+    const [r] = normalizeMonthlyRows([
+      { yr: 2026, mon: 6, local_icode: '3002487', visit_type_code: null },
+    ]);
+    expect(r.visitTypeCode).toBe('');
+  });
+
+  it('throws rather than show totals from a result cut short by the LIMIT', () => {
+    const full = Array.from({ length: SUMMARY_LIMIT }, () => ({
+      yr: 2026,
+      mon: 6,
+      local_icode: '3002487',
+    }));
+    expect(() => normalizeMonthlyRows(full)).toThrow(/ข้อมูลมากเกินกว่าที่ดึงได้/);
   });
 
   it('accepts numeric year/month, including PostgreSQL numeric decimals', () => {
@@ -260,15 +317,15 @@ describe('normalizeMonthlyRows', () => {
 });
 
 describe('normalizeMonthlyTotals', () => {
-  it('maps each month to its distinct visit count', () => {
+  it('maps each month and visit type to its distinct visit count', () => {
     expect(
       normalizeMonthlyTotals([
-        { yr: '2025', mon: '10', visit_count: '7' },
-        { yr: '2025', mon: '11', visit_count: 3 },
+        { yr: '2025', mon: '10', visit_type_code: '01', visit_count: '7' },
+        { yr: '2025', mon: '11', visit_type_code: null, visit_count: 3 },
       ]),
     ).toEqual([
-      { month: '2025-10', visits: 7 },
-      { month: '2025-11', visits: 3 },
+      { month: '2025-10', visitTypeCode: '01', visits: 7 },
+      { month: '2025-11', visitTypeCode: '', visits: 3 },
     ]);
   });
 });
@@ -329,7 +386,10 @@ describe('buildFiscalSeries', () => {
   it('prefers the distinct monthly visit total so shared visits are not double-counted', () => {
     const series = buildFiscalSeries(
       [row({ icode: '3002487', visits: 3 }), row({ icode: '3002416', visits: 3 })],
-      [{ month: '2025-10', visits: 5 }],
+      [
+        { month: '2025-10', visitTypeCode: '01', visits: 4 },
+        { month: '2025-10', visitTypeCode: '', visits: 1 },
+      ],
       2569,
       today,
     );

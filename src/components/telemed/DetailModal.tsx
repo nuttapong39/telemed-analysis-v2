@@ -31,7 +31,7 @@ import { ChangeBadge, SegmentedToggle } from '@/components/telemed/primitives';
 import { SERVICE_VISUALS } from '@/components/telemed/serviceTheme';
 import type { ServiceTone } from '@/components/telemed/serviceTheme';
 import type { TrendMetric } from '@/components/telemed/MonthlyTrendChart';
-import { percentChange } from '@/services/telemed';
+import { addInto, emptyMetrics, percentChange } from '@/services/telemed';
 import type { FiscalMonthPoint, Metrics } from '@/services/telemed';
 import { NO_VALUE, formatBaht, formatNumber, formatPercent } from '@/utils/format';
 
@@ -56,15 +56,8 @@ function pick(point: FiscalMonthPoint, tone: ServiceTone): Metrics {
 }
 
 function sum(points: readonly FiscalMonthPoint[], tone: ServiceTone, count: number): Metrics {
-  const out: Metrics = { itemRows: 0, visits: 0, qty: 0, amount: 0, zeroPriceRows: 0 };
-  for (const p of points.slice(0, count)) {
-    const m = pick(p, tone);
-    out.itemRows += m.itemRows;
-    out.visits += m.visits;
-    out.qty += m.qty;
-    out.amount += m.amount;
-    out.zeroPriceRows += m.zeroPriceRows;
-  }
+  const out = emptyMetrics();
+  for (const p of points.slice(0, count)) addInto(out, pick(p, tone));
   return out;
 }
 

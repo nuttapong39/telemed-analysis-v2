@@ -40,31 +40,15 @@ export const TELEMED_ICODES: readonly string[] = TELEMED_SERVICES.map((s) => s.i
 
 const SERVICE_BY_ICODE = new Map(TELEMED_SERVICES.map((s) => [s.icode, s]));
 
-/** Upper bound on summary rows: 24 months × 3 services, with headroom. */
-const SUMMARY_LIMIT = 1000;
+/**
+ * Upper bound on summary rows: 24 months × services × visit types, with
+ * headroom. Reaching it means the result was cut short, which is an error.
+ */
+export const SUMMARY_LIMIT = 5000;
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-/** One (month × service) summary row, normalised. */
-export interface MonthlyServiceRow {
-  /** `yyyy-MM` */
-  month: string;
-  icode: string;
-  serviceName: string;
-  itemRows: number;
-  visits: number;
-  qty: number;
-  amount: number;
-  zeroPriceRows: number;
-}
-
-/** Distinct visits in a month across all three services. */
-export interface MonthlyTotalRow {
-  month: string;
-  visits: number;
-}
 
 export interface Metrics {
   itemRows: number;
@@ -72,6 +56,26 @@ export interface Metrics {
   qty: number;
   amount: number;
   zeroPriceRows: number;
+  /** Lines with no VN, counted as visits by HN + visit date instead. */
+  noVnRows: number;
+}
+
+/** One (month × service × visit type) summary row, normalised. */
+export interface MonthlyServiceRow extends Metrics {
+  /** `yyyy-MM` */
+  month: string;
+  standardCode: string;
+  icode: string;
+  serviceName: string;
+  /** `''` when the line has no visit record. */
+  visitTypeCode: string;
+}
+
+/** Distinct visits in a (month × visit type) across all services. */
+export interface MonthlyTotalRow {
+  month: string;
+  visitTypeCode: string;
+  visits: number;
 }
 
 export interface FiscalMonthPoint {
@@ -126,20 +130,22 @@ function toMonth(raw: Record<string, unknown>): string {
   return `${year}-${String(month).padStart(2, '0')}`;
 }
 
-function emptyMetrics(): Metrics {
-  return { itemRows: 0, visits: 0, qty: 0, amount: 0, zeroPriceRows: 0 };
+export function emptyMetrics(): Metrics {
+  return { itemRows: 0, visits: 0, qty: 0, amount: 0, zeroPriceRows: 0, noVnRows: 0 };
 }
 
 function emptyServices(): Record<ServiceKey, Metrics> {
   return { b2b: emptyMetrics(), b2c: emptyMetrics(), telehealth: emptyMetrics() };
 }
 
-function addInto(target: Metrics, source: Metrics): void {
+/** Add `source` into `target`, metric by metric. */
+export function addInto(target: Metrics, source: Metrics): void {
   target.itemRows += source.itemRows;
   target.visits += source.visits;
   target.qty += source.qty;
   target.amount += source.amount;
   target.zeroPriceRows += source.zeroPriceRows;
+  target.noVnRows += source.noVnRows;
 }
 
 // ---------------------------------------------------------------------------
@@ -195,51 +201,74 @@ export function elapsedMonths(fiscalYear: number, today: Date): number {
 // SQL construction
 // ---------------------------------------------------------------------------
 
+/** NHSO ADP standard code shared by every hospital's telemedicine items. */
+export const TELMED_ADP_CODE = 'TELMED';
+/** ADP item type the TELMED code is registered under. */
+export const TELMED_ADP_TYPE_ID = 3;
+
 /**
- * Date bindings covering the selected fiscal year and the one before it, so a
- * single fetch serves both the chart and the year-over-year comparison.
+ * Bindings for both summary queries: the TELMED standard code, and dates
+ * covering the selected fiscal year and the one before it, so a single fetch
+ * serves both the chart and the year-over-year comparison.
  */
 export function buildTelemedFetchParams(fiscalYear: number): SqlParams {
   return {
     start_date: { value: fiscalYearRange(fiscalYear - 1).start, value_type: 'date' },
     end_date: { value: fiscalYearRange(fiscalYear).end, value_type: 'date' },
+    adp_code: { value: TELMED_ADP_CODE, value_type: 'string' },
+    adp_type_id: { value: TELMED_ADP_TYPE_ID, value_type: 'integer' },
   };
 }
 
-function icodeList(): string {
-  return TELEMED_ICODES.map((code) => `'${code}'`).join(', ');
-}
+/**
+ * A visit's identity: its VN, or HN + visit date when the charge line carries
+ * no VN. Some databases hold telemedicine charges without a VN; counting VNs
+ * alone reported zero visits for them.
+ */
+const VISIT_KEY = "COALESCE(NULLIF(o.vn, ''), CONCAT(o.hn, '|', o.vstdate))";
+
+/** Telemedicine charge lines in the bound date window, with their visit. */
+const TELMED_FROM = [
+  'FROM opitemrece o',
+  'JOIN nondrugitems n ON n.icode = o.icode',
+  // LEFT: a line with no VN, or a VN missing from ovst, keeps its amount.
+  'LEFT JOIN ovst v ON v.vn = o.vn',
+  'WHERE n.nhso_adp_code = :adp_code AND n.nhso_adp_type_id = :adp_type_id',
+  '  AND o.vstdate BETWEEN :start_date AND :end_date',
+];
 
 /**
- * One row per (month × service).
+ * One row per (month × service × visit type).
  *
  * Year and month are grouped with `EXTRACT`, which PostgreSQL and MySQL both
  * support, and joined into `yyyy-MM` client-side — `TO_CHAR` is PostgreSQL-only.
+ * Each visit has one visit type, so visit counts sum exactly across types.
  */
 export function buildTelemedMonthlySql(): string {
   return [
     'SELECT',
     '  EXTRACT(YEAR FROM o.vstdate)  AS yr,',
     '  EXTRACT(MONTH FROM o.vstdate) AS mon,',
-    '  n.icode                       AS icode,',
+    '  n.nhso_adp_code               AS standard_code,',
+    '  n.icode                       AS local_icode,',
     '  n.name                        AS service_name,',
+    '  v.ovstist                     AS visit_type_code,',
     '  COUNT(*)                      AS item_rows,',
-    '  COUNT(DISTINCT o.vn)          AS visit_count,',
+    `  COUNT(DISTINCT ${VISIT_KEY}) AS visit_count,`,
     '  SUM(o.qty)                    AS total_qty,',
     '  SUM(o.sum_price)              AS total_amount,',
-    '  SUM(CASE WHEN o.unitprice = 0 THEN 1 ELSE 0 END) AS zero_price_rows',
-    'FROM opitemrece o',
-    'JOIN nondrugitems n ON o.icode = n.icode',
-    `WHERE o.icode IN (${icodeList()})`,
-    '  AND o.vstdate BETWEEN :start_date AND :end_date',
-    'GROUP BY EXTRACT(YEAR FROM o.vstdate), EXTRACT(MONTH FROM o.vstdate), n.icode, n.name',
-    'ORDER BY yr, mon, icode',
+    '  SUM(CASE WHEN o.unitprice = 0 THEN 1 ELSE 0 END) AS zero_price_rows,',
+    "  SUM(CASE WHEN o.vn IS NULL OR o.vn = '' THEN 1 ELSE 0 END) AS no_vn_rows",
+    ...TELMED_FROM,
+    'GROUP BY EXTRACT(YEAR FROM o.vstdate), EXTRACT(MONTH FROM o.vstdate),',
+    '  n.nhso_adp_code, n.icode, n.name, v.ovstist',
+    'ORDER BY yr, mon, local_icode, visit_type_code',
     `LIMIT ${SUMMARY_LIMIT}`,
   ].join('\n');
 }
 
 /**
- * Distinct visits per month across all three services.
+ * Distinct visits per (month × visit type) across all services.
  *
  * A visit that carries two telemedicine codes appears once per service in
  * {@link buildTelemedMonthlySql}; this keeps the all-services total exact.
@@ -249,12 +278,11 @@ export function buildTelemedMonthlyTotalSql(): string {
     'SELECT',
     '  EXTRACT(YEAR FROM o.vstdate)  AS yr,',
     '  EXTRACT(MONTH FROM o.vstdate) AS mon,',
-    '  COUNT(DISTINCT o.vn) AS visit_count',
-    'FROM opitemrece o',
-    `WHERE o.icode IN (${icodeList()})`,
-    '  AND o.vstdate BETWEEN :start_date AND :end_date',
-    'GROUP BY EXTRACT(YEAR FROM o.vstdate), EXTRACT(MONTH FROM o.vstdate)',
-    'ORDER BY yr, mon',
+    '  v.ovstist AS visit_type_code,',
+    `  COUNT(DISTINCT ${VISIT_KEY}) AS visit_count`,
+    ...TELMED_FROM,
+    'GROUP BY EXTRACT(YEAR FROM o.vstdate), EXTRACT(MONTH FROM o.vstdate), v.ovstist',
+    'ORDER BY yr, mon, visit_type_code',
     `LIMIT ${SUMMARY_LIMIT}`,
   ].join('\n');
 }
@@ -262,6 +290,19 @@ export function buildTelemedMonthlyTotalSql(): string {
 // ---------------------------------------------------------------------------
 // Normalisation
 // ---------------------------------------------------------------------------
+
+/**
+ * A result as long as the LIMIT was probably cut short; summing it would
+ * under-report silently, so refuse it instead.
+ */
+function assertComplete(data: readonly unknown[]): void {
+  if (data.length >= SUMMARY_LIMIT) {
+    throw new Error(
+      `ข้อมูลมากเกินกว่าที่ดึงได้ในครั้งเดียว (${SUMMARY_LIMIT.toLocaleString('th-TH')} แถว) ` +
+        'ตัวเลขจึงอาจไม่ครบ กรุณาแจ้งผู้ดูแลระบบ',
+    );
+  }
+}
 
 /**
  * Normalise raw monthly summary rows.
@@ -273,40 +314,45 @@ export function normalizeMonthlyRows(
   data: readonly unknown[] | undefined,
 ): MonthlyServiceRow[] {
   if (!data) return [];
+  assertComplete(data);
 
   const rows: MonthlyServiceRow[] = [];
   for (const entry of data) {
     const raw = entry as Record<string, unknown>;
     const month = toMonth(raw);
-    const icode = str(raw.icode);
+    const icode = str(raw.local_icode ?? raw.icode);
     if (month === '' || !SERVICE_BY_ICODE.has(icode)) continue;
 
     rows.push({
       month,
+      standardCode: str(raw.standard_code),
       icode,
       serviceName: str(raw.service_name),
+      visitTypeCode: str(raw.visit_type_code),
       itemRows: num(raw.item_rows),
       visits: num(raw.visit_count),
       qty: num(raw.total_qty),
       amount: num(raw.total_amount),
       zeroPriceRows: num(raw.zero_price_rows),
+      noVnRows: num(raw.no_vn_rows),
     });
   }
   return rows;
 }
 
-/** Normalise raw per-month distinct-visit totals. */
+/** Normalise raw per-(month × visit type) distinct-visit totals. */
 export function normalizeMonthlyTotals(
   data: readonly unknown[] | undefined,
 ): MonthlyTotalRow[] {
   if (!data) return [];
+  assertComplete(data);
 
   const rows: MonthlyTotalRow[] = [];
   for (const entry of data) {
     const raw = entry as Record<string, unknown>;
     const month = toMonth(raw);
     if (month === '') continue;
-    rows.push({ month, visits: num(raw.visit_count) });
+    rows.push({ month, visitTypeCode: str(raw.visit_type_code), visits: num(raw.visit_count) });
   }
   return rows;
 }
@@ -329,7 +375,11 @@ export function buildFiscalSeries(
   today: Date,
 ): FiscalMonthPoint[] {
   const current = format(today, 'yyyy-MM');
-  const totalByMonth = new Map(totals.map((t) => [t.month, t.visits]));
+  // Each visit has one visit type, so the types add up to the month exactly.
+  const totalByMonth = new Map<string, number>();
+  for (const t of totals) {
+    totalByMonth.set(t.month, (totalByMonth.get(t.month) ?? 0) + t.visits);
+  }
 
   const points = fiscalMonths(fiscalYear).map<FiscalMonthPoint>((month) => ({
     month,

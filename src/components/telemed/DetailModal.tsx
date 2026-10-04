@@ -2,9 +2,9 @@
 // Telemedicine Dashboard - drill-down detail modal
 //
 // Opened from a service card or a chart segment. Answers: how is the figure
-// derived, how does it compare with the prior fiscal year, and how did it move
-// month by month. Everything is sliced from the fiscal series the dashboard
-// already holds — no second fetch.
+// derived, how does it compare with the prior fiscal year, which visit types
+// it came from, and how did it move month by month. Everything is sliced from
+// data the dashboard already holds — no second fetch.
 // =============================================================================
 
 import { useState } from 'react';
@@ -31,7 +31,7 @@ import { ChangeBadge, SegmentedToggle } from '@/components/telemed/primitives';
 import type { ServiceVisual } from '@/components/telemed/serviceTheme';
 import type { TrendMetric } from '@/components/telemed/MonthlyTrendChart';
 import { TOTAL_KEY, addInto, emptyMetrics, percentChange } from '@/services/telemed';
-import type { FiscalMonthPoint, Metrics } from '@/services/telemed';
+import type { FiscalMonthPoint, Metrics, VisitTypeShare } from '@/services/telemed';
 import { NO_VALUE, formatBaht, formatNumber, formatPercent } from '@/utils/format';
 
 interface DetailModalProps {
@@ -50,6 +50,8 @@ interface DetailModalProps {
   /** Months of the fiscal year that have started — the comparison window. */
   monthCount: number;
   compareLabel: string;
+  /** Visits and amount per visit type over the comparison window. */
+  visitTypes: readonly VisitTypeShare[];
 }
 
 function pick(point: FiscalMonthPoint, selection: string): Metrics {
@@ -76,6 +78,7 @@ export function DetailModal({
   fiscalYear,
   monthCount,
   compareLabel,
+  visitTypes,
 }: DetailModalProps) {
   const [metric, setMetric] = useState<TrendMetric>('visits');
   const Icon = visual.icon;
@@ -164,6 +167,57 @@ export function DetailModal({
               </div>
             ))}
           </div>
+        </section>
+
+        {/* Visit types ------------------------------------------------------ */}
+        <section aria-labelledby="detail-visit-types">
+          <h3 id="detail-visit-types" className="mb-1 text-sm font-semibold text-foreground">
+            แยกตามประเภทการมา
+          </h3>
+          <p className="mb-3 text-xs text-muted-foreground">{compareLabel}</p>
+          {visitTypes.length === 0 ? (
+            <p className="rounded-xl border border-dashed border-border/70 px-4 py-6 text-center text-sm text-muted-foreground">
+              ไม่มีรายการในช่วงที่เปรียบเทียบ
+            </p>
+          ) : (
+            <div className="overflow-x-auto rounded-xl border border-border/70">
+              <table className="w-full min-w-[480px] text-sm">
+                <thead className="bg-muted/50 text-xs text-muted-foreground">
+                  <tr>
+                    <th scope="col" className="px-3 py-2 text-left font-medium">ประเภทการมา</th>
+                    <th scope="col" className="px-3 py-2 text-right font-medium">Visit</th>
+                    <th scope="col" className="px-3 py-2 text-right font-medium">ยอดเงิน (บาท)</th>
+                    <th scope="col" className="px-3 py-2 text-right font-medium">สัดส่วน Visit</th>
+                    <th scope="col" className="px-3 py-2 text-right font-medium">
+                      Visit ปีงบ {fiscalYear - 1}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border/50">
+                  {visitTypes.map((v) => (
+                    <tr key={v.code}>
+                      <th scope="row" className="px-3 py-2 text-left font-medium">
+                        {v.name}
+                        {v.code !== '' && (
+                          <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                            {v.code}
+                          </span>
+                        )}
+                      </th>
+                      <td className="px-3 py-2 text-right font-medium tabular-nums">
+                        {formatNumber(v.visits)}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatNumber(v.amount)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatPercent(v.share)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+                        {formatNumber(v.previousVisits)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </section>
 
         {/* Trend ------------------------------------------------------------ */}

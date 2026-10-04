@@ -23,6 +23,11 @@ import {
   toMonthlyCsv,
   csvFilename,
   SUMMARY_LIMIT,
+  TOTAL_KEY,
+  buildVisitTypeNamesSql,
+  normalizeVisitTypeNames,
+  visitTypeLabel,
+  summarizeByVisitType,
 } from '@/services/telemed';
 import type { MonthlyServiceRow, TelemedService } from '@/services/telemed';
 
@@ -482,6 +487,85 @@ describe('summarizeSeries', () => {
     const sum = summarizeSeries(series, 2);
     expect(sum.total.visits).toBe(5);
     expect(sum.services['3002416'].visits).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Visit types
+// ---------------------------------------------------------------------------
+
+describe('buildVisitTypeNamesSql', () => {
+  it('reads the visit-type lookup without depending on its column names', () => {
+    const sql = buildVisitTypeNamesSql();
+    expect(sql).toMatch(/^SELECT \* FROM ovstist\b/);
+    expect(sql).toMatch(/LIMIT \d+/);
+  });
+});
+
+describe('normalizeVisitTypeNames', () => {
+  it('maps each visit-type code to its name', () => {
+    const names = normalizeVisitTypeNames([
+      { ovstist: '01', name: ' มาเอง ' },
+      { ovstist: '02', name: 'มาตามนัด' },
+      { ovstist: null, name: 'ไม่มีรหัส' },
+    ]);
+    expect(names.get('01')).toBe('มาเอง');
+    expect(names.get('02')).toBe('มาตามนัด');
+    expect(names.size).toBe(2);
+  });
+});
+
+describe('visitTypeLabel', () => {
+  const names = new Map([['01', 'มาเอง']]);
+
+  it('uses the lookup name, falling back to the code', () => {
+    expect(visitTypeLabel('01', names)).toBe('มาเอง');
+    expect(visitTypeLabel('09', names)).toBe('ประเภท 09');
+  });
+
+  it('calls a line with no visit record unspecified', () => {
+    expect(visitTypeLabel('', names)).toBe('ไม่ระบุ');
+  });
+});
+
+describe('summarizeByVisitType', () => {
+  const names = new Map([
+    ['01', 'มาเอง'],
+    ['02', 'มาตามนัด'],
+  ]);
+  const rows = [
+    // FY2569, first two months
+    row({ month: '2025-10', icode: 'A', visitTypeCode: '01', visits: 3, amount: 300 }),
+    row({ month: '2025-11', icode: 'A', visitTypeCode: '02', visits: 1, amount: 100 }),
+    row({ month: '2025-11', icode: 'B', visitTypeCode: '01', visits: 2, amount: 200 }),
+    // FY2569, outside a two-month window
+    row({ month: '2026-03', icode: 'A', visitTypeCode: '01', visits: 50, amount: 5000 }),
+    // FY2568, same two months
+    row({ month: '2024-10', icode: 'A', visitTypeCode: '01', visits: 4, amount: 400 }),
+  ];
+  const totals = [
+    // Visit shared by A and B in Nov counts once for all services.
+    { month: '2025-10', visitTypeCode: '01', visits: 3 },
+    { month: '2025-11', visitTypeCode: '01', visits: 1 },
+    { month: '2025-11', visitTypeCode: '02', visits: 1 },
+    { month: '2026-03', visitTypeCode: '01', visits: 50 },
+    { month: '2024-10', visitTypeCode: '01', visits: 4 },
+  ];
+
+  it('sums one service per visit type over the comparison window', () => {
+    expect(summarizeByVisitType(rows, totals, 'A', 2569, 2, names)).toEqual([
+      { code: '01', name: 'มาเอง', visits: 3, amount: 300, share: 75, previousVisits: 4 },
+      { code: '02', name: 'มาตามนัด', visits: 1, amount: 100, share: 25, previousVisits: 0 },
+    ]);
+  });
+
+  it('takes all-services visits from the distinct totals, so shared visits count once', () => {
+    const [selfReferred] = summarizeByVisitType(rows, totals, TOTAL_KEY, 2569, 2, names);
+    expect(selfReferred).toMatchObject({ code: '01', visits: 4, amount: 500, previousVisits: 4 });
+  });
+
+  it('is empty when the window has no rows', () => {
+    expect(summarizeByVisitType(rows, totals, 'A', 2569, 0, names)).toEqual([]);
   });
 });
 

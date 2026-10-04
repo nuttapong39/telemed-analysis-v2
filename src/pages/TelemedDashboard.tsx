@@ -27,6 +27,7 @@ import {
   buildTelemedFetchParams,
   buildTelemedMonthlySql,
   buildTelemedMonthlyTotalSql,
+  buildVisitTypeNamesSql,
   csvFilename,
   deriveServices,
   elapsedMonths,
@@ -37,7 +38,9 @@ import {
   fiscalYearOptions,
   normalizeMonthlyRows,
   normalizeMonthlyTotals,
+  normalizeVisitTypeNames,
   percentChange,
+  summarizeByVisitType,
   summarizeSeries,
   toMonthlyCsv,
 } from '@/services/telemed';
@@ -59,7 +62,7 @@ import { MonthlyTable } from '@/components/telemed/MonthlyTable';
 import { DetailModal } from '@/components/telemed/DetailModal';
 import { TOTAL_VISUAL, withVisuals } from '@/components/telemed/serviceTheme';
 import type { ServiceEntry } from '@/components/telemed/serviceTheme';
-import type { SqlApiResponse } from '@/types';
+import type { ConnectionConfig, SqlApiResponse } from '@/types';
 import { downloadTextFile, formatNumber } from '@/utils/format';
 
 // ---------------------------------------------------------------------------
@@ -69,6 +72,29 @@ import { downloadTextFile, formatNumber } from '@/utils/format';
 interface TelemedData {
   rows: MonthlyServiceRow[];
   totals: MonthlyTotalRow[];
+  /** Visit-type code → name; empty when the lookup is unavailable. */
+  visitTypeNames: Map<string, string>;
+}
+
+/**
+ * Visit-type names are a nicety: if this site's lookup cannot be read, the
+ * breakdown falls back to codes rather than failing the dashboard.
+ */
+async function loadVisitTypeNames(
+  config: ConnectionConfig,
+  marketplaceToken: string | undefined,
+): Promise<Map<string, string>> {
+  try {
+    const response = await executeSqlViaApiQueued(
+      buildVisitTypeNamesSql(),
+      config,
+      undefined,
+      marketplaceToken,
+    );
+    return response.MessageCode === 200 ? normalizeVisitTypeNames(response.data) : new Map();
+  } catch {
+    return new Map();
+  }
 }
 
 /** Throw a readable error when the API answers but not with success. */
@@ -133,15 +159,17 @@ export default function TelemedDashboard() {
 
   const { data, error, isLoading, isError, execute } = useQuery<TelemedData>({
     queryFn: async () => {
-      if (!connectionConfig) return { rows: [], totals: [] };
+      if (!connectionConfig) return { rows: [], totals: [], visitTypeNames: new Map() };
       const params = buildTelemedFetchParams(fiscalYear);
-      const [monthly, totals] = await Promise.all([
+      const [monthly, totals, visitTypeNames] = await Promise.all([
         executeSqlViaApiQueued(buildTelemedMonthlySql(), connectionConfig, params, marketplaceToken),
         executeSqlViaApiQueued(buildTelemedMonthlyTotalSql(), connectionConfig, params, marketplaceToken),
+        loadVisitTypeNames(connectionConfig, marketplaceToken),
       ]);
       return {
         rows: normalizeMonthlyRows(ensureOk(monthly).data ?? []),
         totals: normalizeMonthlyTotals(ensureOk(totals).data ?? []),
+        visitTypeNames,
       };
     },
   });
@@ -224,6 +252,20 @@ export default function TelemedDashboard() {
   ];
 
   const detailService = services.find((s) => s.icode === detail) ?? null;
+  const detailSelection = detailService ? detailService.icode : TOTAL_KEY;
+  const visitTypeNames = data?.visitTypeNames;
+  const visitTypes = useMemo(() => {
+    if (detail === null) return [];
+    const selection = services.some((s) => s.icode === detail) ? detail : TOTAL_KEY;
+    return summarizeByVisitType(
+      rows,
+      totals,
+      selection,
+      fiscalYear,
+      monthCount,
+      visitTypeNames ?? new Map(),
+    );
+  }, [detail, services, rows, totals, fiscalYear, monthCount, visitTypeNames]);
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 px-4 py-6 sm:px-6 lg:py-8">
@@ -356,7 +398,7 @@ export default function TelemedDashboard() {
         <DetailModal
           open
           onOpenChange={(open) => !open && setDetail(null)}
-          selection={detailService ? detailService.icode : TOTAL_KEY}
+          selection={detailSelection}
           visual={detailService ? detailService.visual : TOTAL_VISUAL}
           title={detailService ? detailService.name : TOTAL_LABEL}
           description={detailService ? `รหัส ${detailService.icode}` : totalDescription}
@@ -369,6 +411,7 @@ export default function TelemedDashboard() {
           fiscalYear={fiscalYear}
           monthCount={monthCount}
           compareLabel={compareLabel}
+          visitTypes={visitTypes}
         />
       )}
     </div>

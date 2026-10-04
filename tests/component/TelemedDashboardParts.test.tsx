@@ -8,8 +8,9 @@ import { TelemedHero } from '@/components/telemed/TelemedHero'
 import { ServiceCard } from '@/components/telemed/ServiceCard'
 import { MonthlyTable } from '@/components/telemed/MonthlyTable'
 import { FiscalYearSelect } from '@/components/telemed/primitives'
-import { serviceVisual, withVisuals } from '@/components/telemed/serviceTheme'
-import { buildFiscalSeries, deriveServices } from '@/services/telemed'
+import { DetailModal } from '@/components/telemed/DetailModal'
+import { TOTAL_VISUAL, serviceVisual, withVisuals } from '@/components/telemed/serviceTheme'
+import { TOTAL_KEY, buildFiscalSeries, deriveServices } from '@/services/telemed'
 import type { MonthlyServiceRow } from '@/services/telemed'
 
 function row(overrides: Partial<MonthlyServiceRow> = {}): MonthlyServiceRow {
@@ -103,6 +104,52 @@ describe('FiscalYearSelect', () => {
     expect(within(select).getAllByRole('option')).toHaveLength(3)
     fireEvent.change(select, { target: { value: '2568' } })
     expect(onChange).toHaveBeenCalledWith(2568)
+  })
+})
+
+describe('DetailModal', () => {
+  const series = buildFiscalSeries([], [], [], 2569, new Date(2026, 8, 30))
+  const base = {
+    open: true,
+    onOpenChange: () => {},
+    selection: TOTAL_KEY,
+    visual: TOTAL_VISUAL,
+    title: 'รวมทุกบริการ',
+    description: 'ทุกรหัสที่ตั้งรหัสมาตรฐาน TELMED (2 รหัส)',
+    derivation: 'คำอธิบาย',
+    series,
+    previousSeries: series,
+    fiscalYear: 2569,
+    monthCount: 12,
+    compareLabel: 'เทียบปีงบประมาณ 2568',
+  }
+
+  it('breaks the comparison window down by visit type', () => {
+    render(
+      <DetailModal
+        {...base}
+        visitTypes={[
+          { code: '01', name: 'มาเอง', visits: 30, amount: 7500, share: 75, previousVisits: 20 },
+          { code: '', name: 'ไม่ระบุ', visits: 10, amount: 2500, share: 25, previousVisits: 0 },
+        ]}
+      />,
+    )
+    const section = screen.getByRole('region', { name: 'แยกตามประเภทการมา' })
+    const rows = within(section).getAllByRole('row')
+    expect(rows).toHaveLength(3)
+    expect(within(rows[1]).getAllByRole('cell').map((c) => c.textContent)).toEqual([
+      '30',
+      '7,500',
+      '75%',
+      '20',
+    ])
+    expect(within(rows[2]).getByRole('rowheader')).toHaveTextContent('ไม่ระบุ')
+  })
+
+  it('says so when the window has no visits to break down', () => {
+    render(<DetailModal {...base} visitTypes={[]} />)
+    const section = screen.getByRole('region', { name: 'แยกตามประเภทการมา' })
+    expect(within(section).getByText('ไม่มีรายการในช่วงที่เปรียบเทียบ')).toBeInTheDocument()
   })
 })
 

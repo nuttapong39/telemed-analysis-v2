@@ -281,6 +281,18 @@ export function buildTelemedMonthlyTotalSql(): string {
   ].join('\n');
 }
 
+/** Upper bound on visit-type lookup rows; the table holds a few dozen at most. */
+const VISIT_TYPE_LIMIT = 500;
+
+/**
+ * The visit-type lookup, kept out of the summary queries: names are a nicety,
+ * so a site whose lookup differs still gets its numbers. `*` avoids depending
+ * on column names beyond the code and `name`.
+ */
+export function buildVisitTypeNamesSql(): string {
+  return `SELECT * FROM ovstist LIMIT ${VISIT_TYPE_LIMIT}`;
+}
+
 // ---------------------------------------------------------------------------
 // Normalisation
 // ---------------------------------------------------------------------------
@@ -432,6 +444,99 @@ export function summarizeSeries(
     addInto(summary.total, point.total);
   }
   return summary;
+}
+
+// ---------------------------------------------------------------------------
+// Visit types
+// ---------------------------------------------------------------------------
+
+/** Visit-type code → name, from the lookup table. */
+export function normalizeVisitTypeNames(data: readonly unknown[] | undefined): Map<string, string> {
+  const names = new Map<string, string>();
+  for (const entry of data ?? []) {
+    const raw = entry as Record<string, unknown>;
+    const code = str(raw.ovstist);
+    const name = str(raw.name);
+    if (code !== '' && name !== '') names.set(code, name);
+  }
+  return names;
+}
+
+/** Display name of a visit type; `''` is a line with no visit record. */
+export function visitTypeLabel(code: string, names: ReadonlyMap<string, string>): string {
+  if (code === '') return 'ไม่ระบุ';
+  return names.get(code) ?? `ประเภท ${code}`;
+}
+
+export interface VisitTypeShare {
+  code: string;
+  name: string;
+  visits: number;
+  amount: number;
+  /** Percentage of the window's visits, 0–100. */
+  share: number;
+  /** Visits in the same months of the prior fiscal year. */
+  previousVisits: number;
+}
+
+/**
+ * Visits and amount per visit type for one service, or all services
+ * ({@link TOTAL_KEY}), over the first `monthCount` months of `fiscalYear` —
+ * the same window the cards compare — with the prior year's visits alongside.
+ *
+ * All-services visits come from `totals`, so a visit billed under two codes
+ * counts once; amounts always come from the service rows.
+ */
+export function summarizeByVisitType(
+  rows: readonly MonthlyServiceRow[],
+  totals: readonly MonthlyTotalRow[],
+  selection: string,
+  fiscalYear: number,
+  monthCount: number,
+  names: ReadonlyMap<string, string>,
+): VisitTypeShare[] {
+  const window = new Set(fiscalMonths(fiscalYear).slice(0, monthCount));
+  const previousWindow = new Set(fiscalMonths(fiscalYear - 1).slice(0, monthCount));
+  const isTotal = selection === TOTAL_KEY;
+
+  const byCode = new Map<string, { visits: number; amount: number; previousVisits: number }>();
+  const entry = (code: string) => {
+    let found = byCode.get(code);
+    if (!found) {
+      found = { visits: 0, amount: 0, previousVisits: 0 };
+      byCode.set(code, found);
+    }
+    return found;
+  };
+
+  for (const r of rows) {
+    if (!isTotal && r.icode !== selection) continue;
+    if (window.has(r.month)) {
+      const e = entry(r.visitTypeCode);
+      e.amount += r.amount;
+      if (!isTotal) e.visits += r.visits;
+    } else if (!isTotal && previousWindow.has(r.month)) {
+      entry(r.visitTypeCode).previousVisits += r.visits;
+    }
+  }
+
+  if (isTotal) {
+    for (const t of totals) {
+      if (window.has(t.month)) entry(t.visitTypeCode).visits += t.visits;
+      else if (previousWindow.has(t.month)) entry(t.visitTypeCode).previousVisits += t.visits;
+    }
+  }
+
+  const windowVisits = [...byCode.values()].reduce((sum, e) => sum + e.visits, 0);
+  return [...byCode.entries()]
+    .filter(([, e]) => e.visits > 0 || e.amount > 0 || e.previousVisits > 0)
+    .map(([code, e]) => ({
+      code,
+      name: visitTypeLabel(code, names),
+      ...e,
+      share: windowVisits > 0 ? (e.visits / windowVisits) * 100 : 0,
+    }))
+    .sort((a, b) => b.visits - a.visits || a.code.localeCompare(b.code));
 }
 
 /**

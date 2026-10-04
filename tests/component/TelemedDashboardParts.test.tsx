@@ -201,6 +201,23 @@ describe('DetailModal', () => {
     expect(within(rows[2]).getByRole('rowheader')).toHaveTextContent('ไม่ระบุ')
   })
 
+  it('explains a missing average per visit instead of showing a -100% drop', () => {
+    const lastYear = [row({ month: '2024-10', icode: '3002416', visits: 4, amount: 400 })]
+    const svcs = withVisuals(deriveServices(lastYear))
+    const today = new Date(2026, 8, 30)
+    render(
+      <DetailModal
+        {...base}
+        series={buildFiscalSeries(lastYear, [], svcs, 2569, today)}
+        previousSeries={buildFiscalSeries(lastYear, [], svcs, 2568, today)}
+        visitTypes={[]}
+      />,
+    )
+    const figure = screen.getByText('เฉลี่ยต่อ Visit').parentElement!
+    expect(within(figure).getByText('ไม่มี Visit ในช่วงนี้')).toBeInTheDocument()
+    expect(within(figure).queryByText('-100%')).not.toBeInTheDocument()
+  })
+
   it('says so when the window has no visits to break down', () => {
     render(<DetailModal {...base} visitTypes={[]} />)
     const section = screen.getByRole('region', { name: 'แยกตามประเภทการมา' })

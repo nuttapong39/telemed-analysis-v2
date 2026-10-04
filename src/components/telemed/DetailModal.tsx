@@ -116,7 +116,10 @@ export function DetailModal({
       label: 'เฉลี่ยต่อ Visit',
       value: current.visits > 0 ? formatBaht(avg(current)) : NO_VALUE,
       before: previous.visits > 0 ? formatBaht(avg(previous)) : NO_VALUE,
-      change: percentChange(avg(current), avg(previous)),
+      // With no visits there is no average: say so rather than show a -100% drop.
+      ...(current.visits > 0
+        ? { change: percentChange(avg(current), avg(previous)) }
+        : { sub: 'ไม่มี Visit ในช่วงนี้' }),
     },
     {
       label: 'รายการไม่คิดเงิน',

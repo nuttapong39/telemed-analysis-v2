@@ -217,9 +217,10 @@ export function buildTelemedFetchParams(fiscalYear: number): SqlParams {
 /**
  * A visit's identity: its VN, or HN + visit date when the charge line carries
  * no VN. Some databases hold telemedicine charges without a VN; counting VNs
- * alone reported zero visits for them.
+ * alone reported zero visits for them. The HN is coalesced so MySQL (CONCAT
+ * of NULL is NULL) and PostgreSQL (concat skips NULLs) count alike.
  */
-const VISIT_KEY = "COALESCE(NULLIF(o.vn, ''), CONCAT(o.hn, '|', o.vstdate))";
+const VISIT_KEY = "COALESCE(NULLIF(o.vn, ''), CONCAT(COALESCE(o.hn, ''), '|', o.vstdate))";
 
 /** Telemedicine charge lines in the bound date window, with their visit. */
 const TELMED_FROM = [
@@ -325,7 +326,7 @@ export function normalizeMonthlyRows(
   for (const entry of data) {
     const raw = entry as Record<string, unknown>;
     const month = toMonth(raw);
-    const icode = str(raw.local_icode ?? raw.icode);
+    const icode = str(raw.local_icode);
     if (month === '' || icode === '') continue;
 
     rows.push({

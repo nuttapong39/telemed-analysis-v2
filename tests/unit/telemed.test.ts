@@ -182,7 +182,9 @@ describe('buildTelemedFetchParams', () => {
 });
 
 /** Visit identity: the VN, or HN + visit date for a charge line without one. */
-const VISIT_KEY = "COALESCE(NULLIF(o.vn, ''), CONCAT(o.hn, '|', o.vstdate))";
+// The HN is coalesced so MySQL (CONCAT of NULL is NULL) and PostgreSQL
+// (concat skips NULLs) agree on a line that has neither VN nor HN.
+const VISIT_KEY = "COALESCE(NULLIF(o.vn, ''), CONCAT(COALESCE(o.hn, ''), '|', o.vstdate))";
 
 describe('buildTelemedMonthlySql', () => {
   const sql = buildTelemedMonthlySql();
@@ -314,12 +316,12 @@ describe('normalizeMonthlyRows', () => {
   });
 
   it('accepts numeric year/month, including PostgreSQL numeric decimals', () => {
-    const [r] = normalizeMonthlyRows([{ yr: 2026, mon: '1.0', icode: '3002416' }]);
+    const [r] = normalizeMonthlyRows([{ yr: 2026, mon: '1.0', local_icode: '3002416' }]);
     expect(r.month).toBe('2026-01');
   });
 
   it('accepts a preformatted year_month column', () => {
-    const [r] = normalizeMonthlyRows([{ year_month: '2026-03', icode: '3002416' }]);
+    const [r] = normalizeMonthlyRows([{ year_month: '2026-03', local_icode: '3002416' }]);
     expect(r.month).toBe('2026-03');
   });
 
@@ -331,6 +333,10 @@ describe('normalizeMonthlyRows', () => {
         { yr: '2026', mon: '1', local_icode: null },
       ]),
     ).toEqual([]);
+  });
+
+  it('reads the code from the local_icode column only', () => {
+    expect(normalizeMonthlyRows([{ yr: '2026', mon: '1', icode: '3002416' }])).toEqual([]);
   });
 
   it('keeps any local code the TELMED filter returned, not just known ones', () => {

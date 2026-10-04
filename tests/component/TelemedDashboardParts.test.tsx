@@ -10,6 +10,7 @@ import { MonthlyTable } from '@/components/telemed/MonthlyTable'
 import { FiscalYearSelect } from '@/components/telemed/primitives'
 import { DetailModal } from '@/components/telemed/DetailModal'
 import { DetailDataTable } from '@/components/telemed/DetailDataTable'
+import { MonthlyTrendChart } from '@/components/telemed/MonthlyTrendChart'
 import { TOTAL_VISUAL, serviceVisual, withVisuals } from '@/components/telemed/serviceTheme'
 import { TOTAL_KEY, buildFiscalSeries, deriveServices } from '@/services/telemed'
 import type { MonthlyServiceRow } from '@/services/telemed'
@@ -105,6 +106,59 @@ describe('FiscalYearSelect', () => {
     expect(within(select).getAllByRole('option')).toHaveLength(3)
     fireEvent.change(select, { target: { value: '2568' } })
     expect(onChange).toHaveBeenCalledWith(2568)
+  })
+})
+
+describe('chart sizing', () => {
+  // Recharts warns when a chart's first render has no positive size. It warns
+  // in production builds too, so the Marketplace reviewers saw it.
+  function sizeWarnings(spy: ReturnType<typeof vi.spyOn>) {
+    return spy.mock.calls.filter((args: unknown[]) =>
+      String(args[0]).includes('should be greater than 0'),
+    )
+  }
+
+  it('renders the trend chart without a Recharts size warning', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const rows = [row({ month: '2025-10', icode: '3002416', visits: 3 })]
+    const services = withVisuals(deriveServices(rows))
+    const series = buildFiscalSeries(rows, [], services, 2569, new Date(2026, 8, 30))
+    render(
+      <MonthlyTrendChart
+        series={series}
+        previousSeries={series}
+        services={services}
+        previousFiscalYear={2568}
+        metric="visits"
+        onSelectService={() => {}}
+      />,
+    )
+    expect(sizeWarnings(warn)).toEqual([])
+    warn.mockRestore()
+  })
+
+  it('renders the detail modal chart without a Recharts size warning', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const series = buildFiscalSeries([], [], [], 2569, new Date(2026, 8, 30))
+    render(
+      <DetailModal
+        open
+        onOpenChange={() => {}}
+        selection={TOTAL_KEY}
+        visual={TOTAL_VISUAL}
+        title="รวมทุกบริการ"
+        description=""
+        derivation=""
+        series={series}
+        previousSeries={series}
+        fiscalYear={2569}
+        monthCount={12}
+        compareLabel=""
+        visitTypes={[]}
+      />,
+    )
+    expect(sizeWarnings(warn)).toEqual([])
+    warn.mockRestore()
   })
 })
 

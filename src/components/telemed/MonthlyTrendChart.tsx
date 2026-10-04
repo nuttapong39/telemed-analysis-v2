@@ -26,6 +26,9 @@ import { formatBaht, formatNumber } from '@/utils/format';
 
 export type TrendMetric = 'visits' | 'amount';
 
+/** Plot height in px. */
+const CHART_HEIGHT = 288;
+
 interface ChartDatum {
   label: string;
   isFuture: boolean;
@@ -114,8 +117,10 @@ export function MonthlyTrendChart({
 
   return (
     <div>
-      <div className="h-72 w-full">
-        <ResponsiveContainer width="100%" height="100%">
+      {/* A numeric height keeps the first render, before the container is
+          measured, from triggering Recharts' "width(-1) and height(-1)" warning. */}
+      <div className="w-full min-w-0">
+        <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
           <ComposedChart data={data} margin={{ top: 8, right: 4, bottom: 0, left: 0 }} barCategoryGap="28%">
             <CartesianGrid strokeDasharray="3 6" stroke="hsl(var(--border))" vertical={false} />
             {future.length > 0 && (

@@ -34,6 +34,9 @@ import { TOTAL_KEY, addInto, emptyMetrics, percentChange } from '@/services/tele
 import type { FiscalMonthPoint, Metrics, VisitTypeShare } from '@/services/telemed';
 import { NO_VALUE, formatBaht, formatNumber, formatPercent } from '@/utils/format';
 
+/** Trend plot height in px. */
+const CHART_HEIGHT = 208;
+
 interface DetailModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -234,8 +237,9 @@ export function DetailModal({
               ]}
             />
           </div>
-          <div className="h-52 w-full">
-            <ResponsiveContainer width="100%" height="100%">
+          {/* Numeric height: see MonthlyTrendChart. */}
+          <div className="w-full min-w-0">
+            <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
               <ComposedChart data={chart} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
                 <defs>
                   <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">

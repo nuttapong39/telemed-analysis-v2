@@ -2,10 +2,13 @@
 // Telemedicine Dashboard - Monthly Service Summary
 //
 // Two responsibilities, deliberately kept apart:
-//   1. Build the summary queries: one row per (month × service), plus a
-//      per-month distinct-visit total across services.
+//   1. Build the summary queries: one row per (month × service × visit type),
+//      plus a per-(month × visit type) distinct-visit total across services.
 //   2. Reduce those rows, entirely client-side, into fiscal-year series,
 //      year-to-date sums and the CSV export.
+//
+// A service is any local code mapped to the NHSO standard code TELMED, so the
+// set of services differs per hospital and is read from the data.
 //
 // The dashboard reads monthly aggregates only — never patient-level rows.
 // All reduction functions are pure so they are cheap to unit-test.
@@ -19,26 +22,15 @@ import type { SqlParams } from '@/types';
 // Services
 // ---------------------------------------------------------------------------
 
-export type ServiceKey = 'b2b' | 'b2c' | 'telehealth';
-
+/** A local code mapped to the TELMED standard code. */
 export interface TelemedService {
-  key: ServiceKey;
   icode: string;
-  label: string;
-  /** One-line meaning shown under the label. */
-  description: string;
+  name: string;
+  standardCode: string;
 }
 
-/** The three telemedicine services, in display order. */
-export const TELEMED_SERVICES: readonly TelemedService[] = [
-  { key: 'b2b', icode: '3002487', label: 'B2B', description: 'บริการร่วมกับ รพ.สต.' },
-  { key: 'b2c', icode: '3002488', label: 'B2C', description: 'คนไข้โดยตรงผ่านวิดีโอคอล/แอป' },
-  { key: 'telehealth', icode: '3002416', label: 'Telehealth', description: 'โทรทางไกลผ่านมือถือ' },
-];
-
-export const TELEMED_ICODES: readonly string[] = TELEMED_SERVICES.map((s) => s.icode);
-
-const SERVICE_BY_ICODE = new Map(TELEMED_SERVICES.map((s) => [s.icode, s]));
+/** Selection key for "all services" — icodes are numeric, so it never clashes. */
+export const TOTAL_KEY = 'total';
 
 /**
  * Upper bound on summary rows: 24 months × services × visit types, with
@@ -85,12 +77,14 @@ export interface FiscalMonthPoint {
   label: string;
   /** The month has not started yet. */
   isFuture: boolean;
-  services: Record<ServiceKey, Metrics>;
+  /** Keyed by icode; every service of the series is present, zero-filled. */
+  services: Record<string, Metrics>;
   total: Metrics;
 }
 
 export interface SeriesSummary {
-  services: Record<ServiceKey, Metrics>;
+  /** Keyed by icode. */
+  services: Record<string, Metrics>;
   total: Metrics;
 }
 
@@ -134,8 +128,8 @@ export function emptyMetrics(): Metrics {
   return { itemRows: 0, visits: 0, qty: 0, amount: 0, zeroPriceRows: 0, noVnRows: 0 };
 }
 
-function emptyServices(): Record<ServiceKey, Metrics> {
-  return { b2b: emptyMetrics(), b2c: emptyMetrics(), telehealth: emptyMetrics() };
+function emptyServices(services: readonly TelemedService[]): Record<string, Metrics> {
+  return Object.fromEntries(services.map((s) => [s.icode, emptyMetrics()]));
 }
 
 /** Add `source` into `target`, metric by metric. */
@@ -307,8 +301,7 @@ function assertComplete(data: readonly unknown[]): void {
 /**
  * Normalise raw monthly summary rows.
  *
- * Rows without a valid month, or for an icode outside the three services, are
- * dropped rather than guessed at.
+ * Rows without a valid month or an icode are dropped rather than guessed at.
  */
 export function normalizeMonthlyRows(
   data: readonly unknown[] | undefined,
@@ -321,7 +314,7 @@ export function normalizeMonthlyRows(
     const raw = entry as Record<string, unknown>;
     const month = toMonth(raw);
     const icode = str(raw.local_icode ?? raw.icode);
-    if (month === '' || !SERVICE_BY_ICODE.has(icode)) continue;
+    if (month === '' || icode === '') continue;
 
     rows.push({
       month,
@@ -362,15 +355,34 @@ export function normalizeMonthlyTotals(
 // ---------------------------------------------------------------------------
 
 /**
+ * The services present in `rows`, one per icode, ordered by icode so each
+ * keeps its position (and colour) across fiscal years.
+ */
+export function deriveServices(rows: readonly MonthlyServiceRow[]): TelemedService[] {
+  const byIcode = new Map<string, TelemedService>();
+  for (const r of rows) {
+    const known = byIcode.get(r.icode);
+    if (known && known.name !== '') continue;
+    byIcode.set(r.icode, { icode: r.icode, name: r.serviceName, standardCode: r.standardCode });
+  }
+  return [...byIcode.values()]
+    .map((s) => (s.name === '' ? { ...s, name: `รหัส ${s.icode}` } : s))
+    .sort((a, b) => a.icode.localeCompare(b.icode));
+}
+
+/**
  * The twelve months of `fiscalYear`, each broken down by service.
  *
- * Months with no rows are present with zeros, so charts keep a fixed axis.
- * The month total's visit count comes from `totals` when available, since
- * summing per-service visits can double-count a visit billed under two codes.
+ * Months with no rows, and services with no rows in a month, are present with
+ * zeros, so charts keep a fixed axis and both fiscal years share one set of
+ * keys. The month total's visit count comes from `totals` when available,
+ * since summing per-service visits can double-count a visit billed under two
+ * codes.
  */
 export function buildFiscalSeries(
   rows: readonly MonthlyServiceRow[],
   totals: readonly MonthlyTotalRow[],
+  services: readonly TelemedService[],
   fiscalYear: number,
   today: Date,
 ): FiscalMonthPoint[] {
@@ -385,16 +397,16 @@ export function buildFiscalSeries(
     month,
     label: fiscalMonthLabel(month),
     isFuture: month > current,
-    services: emptyServices(),
+    services: emptyServices(services),
     total: emptyMetrics(),
   }));
   const pointByMonth = new Map(points.map((p) => [p.month, p]));
 
   for (const r of rows) {
     const point = pointByMonth.get(r.month);
-    const service = SERVICE_BY_ICODE.get(r.icode);
-    if (!point || !service) continue;
-    addInto(point.services[service.key], r);
+    const target = point?.services[r.icode];
+    if (!point || !target) continue;
+    addInto(target, r);
     addInto(point.total, r);
   }
 
@@ -411,10 +423,11 @@ export function summarizeSeries(
   series: readonly FiscalMonthPoint[],
   monthCount = series.length,
 ): SeriesSummary {
-  const summary: SeriesSummary = { services: emptyServices(), total: emptyMetrics() };
+  const summary: SeriesSummary = { services: {}, total: emptyMetrics() };
   for (const point of series.slice(0, monthCount)) {
-    for (const service of TELEMED_SERVICES) {
-      addInto(summary.services[service.key], point.services[service.key]);
+    for (const [icode, metrics] of Object.entries(point.services)) {
+      summary.services[icode] ??= emptyMetrics();
+      addInto(summary.services[icode], metrics);
     }
     addInto(summary.total, point.total);
   }

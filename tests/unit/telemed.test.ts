@@ -5,8 +5,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-  TELEMED_SERVICES,
-  TELEMED_ICODES,
+  deriveServices,
   fiscalYearOf,
   fiscalYearRange,
   fiscalMonths,
@@ -25,7 +24,7 @@ import {
   csvFilename,
   SUMMARY_LIMIT,
 } from '@/services/telemed';
-import type { MonthlyServiceRow } from '@/services/telemed';
+import type { MonthlyServiceRow, TelemedService } from '@/services/telemed';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -48,6 +47,10 @@ function row(overrides: Partial<MonthlyServiceRow> = {}): MonthlyServiceRow {
   };
 }
 
+function svc(icode: string, name = `บริการ ${icode}`): TelemedService {
+  return { icode, name, standardCode: 'TELMED' };
+}
+
 /** Local-time date, so fiscal boundaries are not shifted by the TZ. */
 function day(y: number, m: number, d: number): Date {
   return new Date(y, m - 1, d);
@@ -57,14 +60,27 @@ function day(y: number, m: number, d: number): Date {
 // Services
 // ---------------------------------------------------------------------------
 
-describe('TELEMED_SERVICES', () => {
-  it('lists B2B, B2C, Telehealth in display order', () => {
-    expect(TELEMED_SERVICES.map((s) => s.label)).toEqual(['B2B', 'B2C', 'Telehealth']);
+describe('deriveServices', () => {
+  it('lists each local code found in the rows once, ordered by code', () => {
+    const services = deriveServices([
+      row({ icode: '3002488', serviceName: 'B2C' }),
+      row({ icode: '3002416', serviceName: 'Telehealth', month: '2025-11' }),
+      row({ icode: '3002488', serviceName: 'B2C', visitTypeCode: '02' }),
+    ]);
+    expect(services).toEqual([
+      { icode: '3002416', name: 'Telehealth', standardCode: 'TELMED' },
+      { icode: '3002488', name: 'B2C', standardCode: 'TELMED' },
+    ]);
   });
 
-  it('maps each service to its icode', () => {
-    expect(TELEMED_SERVICES.map((s) => s.icode)).toEqual(['3002487', '3002488', '3002416']);
-    expect([...TELEMED_ICODES].sort()).toEqual(['3002416', '3002487', '3002488']);
+  it('names a service by its code when the hospital left the name blank', () => {
+    expect(deriveServices([row({ icode: '9000001', serviceName: '' })])[0].name).toBe(
+      'รหัส 9000001',
+    );
+  });
+
+  it('is empty when there are no rows', () => {
+    expect(deriveServices([])).toEqual([]);
   });
 });
 
@@ -301,14 +317,19 @@ describe('normalizeMonthlyRows', () => {
     expect(r.month).toBe('2026-03');
   });
 
-  it('drops rows with no month or an icode outside the three services', () => {
+  it('drops rows with no month or no icode', () => {
     expect(
       normalizeMonthlyRows([
-        { icode: '3002416' },
-        { yr: '2026', mon: '13', icode: '3002416' },
-        { yr: '2026', mon: '1', icode: '9999999' },
+        { local_icode: '3002416' },
+        { yr: '2026', mon: '13', local_icode: '3002416' },
+        { yr: '2026', mon: '1', local_icode: null },
       ]),
     ).toEqual([]);
+  });
+
+  it('keeps any local code the TELMED filter returned, not just known ones', () => {
+    const [r] = normalizeMonthlyRows([{ yr: '2026', mon: '1', local_icode: '9999999' }]);
+    expect(r.icode).toBe('9999999');
   });
 
   it('returns an empty list for missing data', () => {
@@ -336,32 +357,52 @@ describe('normalizeMonthlyTotals', () => {
 
 describe('buildFiscalSeries', () => {
   const today = day(2026, 9, 30);
+  const services = [svc('3002416'), svc('3002487'), svc('3002488')];
 
   it('always returns the twelve fiscal months, filling gaps with zeros', () => {
-    const series = buildFiscalSeries([], [], 2569, today);
+    const series = buildFiscalSeries([], [], services, 2569, today);
     expect(series.map((p) => p.month)).toEqual(fiscalMonths(2569));
     expect(series[0].label).toBe('ต.ค. 68');
     expect(series[0].total.visits).toBe(0);
-    expect(series[0].services.telehealth.amount).toBe(0);
+    expect(series[0].services['3002416'].amount).toBe(0);
   });
 
-  it('places each row under its service key', () => {
+  it('places each row under its service, zero-filling the others', () => {
     const series = buildFiscalSeries(
       [
         row({ icode: '3002487', visits: 3, amount: 300 }),
         row({ icode: '3002416', visits: 5, amount: 500 }),
       ],
       [],
+      services,
       2569,
       today,
     );
-    expect(series[0].services.b2b.visits).toBe(3);
-    expect(series[0].services.telehealth.amount).toBe(500);
-    expect(series[0].services.b2c.visits).toBe(0);
+    expect(series[0].services['3002487'].visits).toBe(3);
+    expect(series[0].services['3002416'].amount).toBe(500);
+    expect(series[0].services['3002488'].visits).toBe(0);
+  });
+
+  it('adds up the visit types of one service', () => {
+    const series = buildFiscalSeries(
+      [
+        row({ icode: '3002487', visitTypeCode: '01', visits: 3, noVnRows: 0 }),
+        row({ icode: '3002487', visitTypeCode: '', visits: 2, noVnRows: 2 }),
+      ],
+      [],
+      services,
+      2569,
+      today,
+    );
+    expect(series[0].services['3002487']).toMatchObject({ visits: 5, noVnRows: 2 });
+  });
+
+  it('has no service columns when the hospital has no TELMED services', () => {
+    expect(buildFiscalSeries([], [], [], 2569, today)[0].services).toEqual({});
   });
 
   it('ignores rows outside the fiscal year', () => {
-    const series = buildFiscalSeries([row({ month: '2025-09' })], [], 2569, today);
+    const series = buildFiscalSeries([row({ month: '2025-09' })], [], services, 2569, today);
     expect(series.every((p) => p.total.visits === 0)).toBe(true);
   });
 
@@ -372,6 +413,7 @@ describe('buildFiscalSeries', () => {
         row({ icode: '3002488', itemRows: 6, qty: 7, amount: 200, zeroPriceRows: 2 }),
       ],
       [],
+      services,
       2569,
       today,
     );
@@ -390,6 +432,7 @@ describe('buildFiscalSeries', () => {
         { month: '2025-10', visitTypeCode: '01', visits: 4 },
         { month: '2025-10', visitTypeCode: '', visits: 1 },
       ],
+      services,
       2569,
       today,
     );
@@ -400,6 +443,7 @@ describe('buildFiscalSeries', () => {
     const series = buildFiscalSeries(
       [row({ icode: '3002487', visits: 3 }), row({ icode: '3002416', visits: 3 })],
       [],
+      services,
       2569,
       today,
     );
@@ -407,7 +451,7 @@ describe('buildFiscalSeries', () => {
   });
 
   it('flags months after today as future', () => {
-    const series = buildFiscalSeries([], [], 2570, day(2026, 12, 15));
+    const series = buildFiscalSeries([], [], services, 2570, day(2026, 12, 15));
     expect(series.map((p) => p.isFuture)).toEqual([
       false, false, false, true, true, true, true, true, true, true, true, true,
     ]);
@@ -422,6 +466,7 @@ describe('summarizeSeries', () => {
       row({ month: '2025-12', icode: '3002416', visits: 4, amount: 400 }),
     ],
     [],
+    [svc('3002416'), svc('3002487')],
     2569,
     day(2026, 9, 30),
   );
@@ -429,14 +474,14 @@ describe('summarizeSeries', () => {
   it('sums the whole year by default', () => {
     const sum = summarizeSeries(series);
     expect(sum.total.visits).toBe(9);
-    expect(sum.services.b2b.amount).toBe(500);
-    expect(sum.services.telehealth.visits).toBe(4);
+    expect(sum.services['3002487'].amount).toBe(500);
+    expect(sum.services['3002416'].visits).toBe(4);
   });
 
   it('sums only the first N months for a year-to-date comparison', () => {
     const sum = summarizeSeries(series, 2);
     expect(sum.total.visits).toBe(5);
-    expect(sum.services.telehealth.visits).toBe(0);
+    expect(sum.services['3002416'].visits).toBe(0);
   });
 });
 

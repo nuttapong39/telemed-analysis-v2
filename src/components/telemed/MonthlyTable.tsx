@@ -1,41 +1,53 @@
 // =============================================================================
 // Telemedicine Dashboard - month × service table
 //
-// Rows are the twelve fiscal months, columns the three services plus the
-// all-services total. Each cell shows visits with the amount beneath it.
+// Rows are the twelve fiscal months, columns the hospital's TELMED services
+// (ordered by code) plus the all-services total. Each cell shows visits with the amount beneath it.
 // Months that have not started are dimmed rather than hidden, so the fiscal
 // year always reads October to September.
 // =============================================================================
 
 import { cn } from '@/lib/utils';
-import { SERVICE_VISUALS } from '@/components/telemed/serviceTheme';
-import { TELEMED_SERVICES, summarizeSeries } from '@/services/telemed';
+import type { ServiceEntry } from '@/components/telemed/serviceTheme';
+import { emptyMetrics, summarizeSeries } from '@/services/telemed';
 import type { FiscalMonthPoint, Metrics } from '@/services/telemed';
 import { NO_VALUE, formatNumber } from '@/utils/format';
 
-export function MonthlyTable({ series }: { series: readonly FiscalMonthPoint[] }) {
+export function MonthlyTable({
+  series,
+  services,
+}: {
+  series: readonly FiscalMonthPoint[];
+  services: readonly ServiceEntry[];
+}) {
   const total = summarizeSeries(series);
+  // Month label + total, plus room for each service column.
+  const minWidth = 240 + services.length * 128;
 
   return (
     <div className="-mx-2 overflow-x-auto px-2">
-      <table className="w-full min-w-[560px] border-separate border-spacing-0 text-sm">
+      <table
+        className="w-full border-separate border-spacing-0 text-sm"
+        style={{ minWidth }}
+      >
         <thead>
           <tr className="text-xs text-muted-foreground">
             <th scope="col" className="border-b border-border px-3 py-2.5 text-left font-medium">
               เดือน
             </th>
-            {TELEMED_SERVICES.map((s) => (
+            {services.map((s) => (
               <th
-                key={s.key}
+                key={s.icode}
                 scope="col"
+                title={`${s.name} · รหัส ${s.icode}`}
                 className="border-b border-border px-3 py-2.5 text-right font-medium"
               >
-                <span className="inline-flex items-center gap-1.5">
+                <span className="inline-flex max-w-40 items-center gap-1.5">
                   <span
                     aria-hidden="true"
-                    className={cn('h-2 w-2 rounded-full', SERVICE_VISUALS[s.key].dot)}
+                    className={cn('h-2 w-2 shrink-0 rounded-full', s.visual.dot)}
                   />
-                  {s.label}
+                  <span className="truncate">{s.name}</span>
                 </span>
               </th>
             ))}
@@ -64,8 +76,8 @@ export function MonthlyTable({ series }: { series: readonly FiscalMonthPoint[] }
               >
                 {point.label}
               </th>
-              {TELEMED_SERVICES.map((s) => (
-                <Cell key={s.key} metrics={point.services[s.key]} future={point.isFuture} />
+              {services.map((s) => (
+                <Cell key={s.icode} metrics={point.services[s.icode]} future={point.isFuture} />
               ))}
               <Cell metrics={point.total} future={point.isFuture} strong />
             </tr>
@@ -77,8 +89,13 @@ export function MonthlyTable({ series }: { series: readonly FiscalMonthPoint[] }
             <th scope="row" className="rounded-l-xl px-3 py-3 text-left font-semibold">
               รวม
             </th>
-            {TELEMED_SERVICES.map((s) => (
-              <Cell key={s.key} metrics={total.services[s.key]} strong className="border-b-0" />
+            {services.map((s) => (
+              <Cell
+                key={s.icode}
+                metrics={total.services[s.icode] ?? emptyMetrics()}
+                strong
+                className="border-b-0"
+              />
             ))}
             <Cell metrics={total.total} strong className="rounded-r-xl border-b-0 text-primary" />
           </tr>

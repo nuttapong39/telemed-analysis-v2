@@ -33,9 +33,15 @@
   --color-warning: hsl(var(--warning));
   --color-info: hsl(var(--info));
   --color-smoke: hsl(var(--smoke));
-  --color-svc-b2b: hsl(var(--svc-b2b));
-  --color-svc-b2c: hsl(var(--svc-b2c));
-  --color-svc-telehealth: hsl(var(--svc-telehealth));
+  --color-svc-1: var(--svc-1);
+  --color-svc-2: var(--svc-2);
+  --color-svc-3: var(--svc-3);
+  --color-svc-4: var(--svc-4);
+  --color-svc-5: var(--svc-5);
+  --color-svc-6: var(--svc-6);
+  --color-svc-7: var(--svc-7);
+  --color-svc-8: var(--svc-8);
+  --color-svc-other: var(--svc-other);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -72,10 +78,19 @@
     /* Smoke white: where the page gradient settles. */
     --smoke: 220 12% 95%;
 
-    /* One colour per telemedicine service, shared by cards, charts, tables. */
-    --svc-b2b: 199 89% 48%;
-    --svc-b2c: 234 89% 74%;
-    --svc-telehealth: 173 80% 40%;
+    /* Categorical slots for telemedicine services, in this fixed order: it is
+       the order that passed the colour-blind separation checks against white.
+       Slots 3-5 sit below 3:1 contrast, so every chart keeps a labelled
+       legend and a table view. Services past the eighth share --svc-other. */
+    --svc-1: #2a78d6;
+    --svc-2: #eb6834;
+    --svc-3: #1baf7a;
+    --svc-4: #eda100;
+    --svc-5: #e87ba4;
+    --svc-6: #008300;
+    --svc-7: #4a3aa7;
+    --svc-8: #e34948;
+    --svc-other: #8a8f98;
 
     --chart-1: 173 80% 40%;
     --chart-2: 199 89% 48%;

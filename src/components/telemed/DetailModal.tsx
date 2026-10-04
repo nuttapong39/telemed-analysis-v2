@@ -28,17 +28,18 @@ import {
 } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 import { ChangeBadge, SegmentedToggle } from '@/components/telemed/primitives';
-import { SERVICE_VISUALS } from '@/components/telemed/serviceTheme';
-import type { ServiceTone } from '@/components/telemed/serviceTheme';
+import type { ServiceVisual } from '@/components/telemed/serviceTheme';
 import type { TrendMetric } from '@/components/telemed/MonthlyTrendChart';
-import { addInto, emptyMetrics, percentChange } from '@/services/telemed';
+import { TOTAL_KEY, addInto, emptyMetrics, percentChange } from '@/services/telemed';
 import type { FiscalMonthPoint, Metrics } from '@/services/telemed';
 import { NO_VALUE, formatBaht, formatNumber, formatPercent } from '@/utils/format';
 
 interface DetailModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  tone: ServiceTone;
+  /** {@link TOTAL_KEY} for all services, otherwise the service's icode. */
+  selection: string;
+  visual: ServiceVisual;
   title: string;
   description: string;
   /** Plain-language explanation of where the numbers come from. */
@@ -51,20 +52,22 @@ interface DetailModalProps {
   compareLabel: string;
 }
 
-function pick(point: FiscalMonthPoint, tone: ServiceTone): Metrics {
-  return tone === 'total' ? point.total : point.services[tone];
+function pick(point: FiscalMonthPoint, selection: string): Metrics {
+  if (selection === TOTAL_KEY) return point.total;
+  return point.services[selection] ?? emptyMetrics();
 }
 
-function sum(points: readonly FiscalMonthPoint[], tone: ServiceTone, count: number): Metrics {
+function sum(points: readonly FiscalMonthPoint[], selection: string, count: number): Metrics {
   const out = emptyMetrics();
-  for (const p of points.slice(0, count)) addInto(out, pick(p, tone));
+  for (const p of points.slice(0, count)) addInto(out, pick(p, selection));
   return out;
 }
 
 export function DetailModal({
   open,
   onOpenChange,
-  tone,
+  selection,
+  visual,
   title,
   description,
   derivation,
@@ -75,19 +78,18 @@ export function DetailModal({
   compareLabel,
 }: DetailModalProps) {
   const [metric, setMetric] = useState<TrendMetric>('visits');
-  const visual = SERVICE_VISUALS[tone];
   const Icon = visual.icon;
-  const gradientId = `detail-fill-${tone}`;
+  const gradientId = `detail-fill-${selection}`;
 
-  const current = sum(series, tone, monthCount);
-  const previous = sum(previousSeries, tone, monthCount);
+  const current = sum(series, selection, monthCount);
+  const previous = sum(previousSeries, selection, monthCount);
   const avg = (m: Metrics) => (m.visits > 0 ? m.amount / m.visits : 0);
   const zeroShare = (m: Metrics) => (m.itemRows > 0 ? (m.zeroPriceRows / m.itemRows) * 100 : 0);
 
   const chart = series.map((p, i) => ({
     label: p.label,
-    current: p.isFuture ? null : pick(p, tone)[metric],
-    previous: previousSeries[i] ? pick(previousSeries[i], tone)[metric] : 0,
+    current: p.isFuture ? null : pick(p, selection)[metric],
+    previous: previousSeries[i] ? pick(previousSeries[i], selection)[metric] : 0,
   }));
   const format = metric === 'amount' ? formatBaht : (v: number) => formatNumber(v);
 
@@ -256,8 +258,8 @@ export function DetailModal({
               </thead>
               <tbody className="divide-y divide-border/50">
                 {series.map((p, i) => {
-                  const m = pick(p, tone);
-                  const before = previousSeries[i] ? pick(previousSeries[i], tone) : null;
+                  const m = pick(p, selection);
+                  const before = previousSeries[i] ? pick(previousSeries[i], selection) : null;
                   return (
                     <tr key={p.month} className={cn(p.isFuture && 'text-muted-foreground/50')}>
                       <th scope="row" className="px-3 py-2 text-left font-medium">{p.label}</th>

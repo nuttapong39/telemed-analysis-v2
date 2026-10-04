@@ -4,8 +4,9 @@
 // Sections, top to bottom:
 //   1. Hero          - heading, fiscal year, illustration
 //   2. Toolbar       - fiscal-year picker, refresh, CSV
-//   3. Service cards - all services, B2B, B2C, Telehealth: visits + amount,
-//                      each against the same months of the prior fiscal year
+//   3. Service cards - all services, then one per TELMED service (read from
+//                      the data, ordered by code): visits + amount, each
+//                      against the same months of the prior fiscal year
 //   4. Monthly trend - stacked bars by service, prior year as a dashed line
 //   5. Month table   - fiscal months × services
 //
@@ -21,13 +22,15 @@ import { useBmsSessionContext } from '@/contexts/BmsSessionContext';
 import { useQuery } from '@/hooks/useQuery';
 import { executeSqlViaApiQueued } from '@/services/bmsSession';
 import {
-  TELEMED_SERVICES,
+  TOTAL_KEY,
   buildFiscalSeries,
   buildTelemedFetchParams,
   buildTelemedMonthlySql,
   buildTelemedMonthlyTotalSql,
   csvFilename,
+  deriveServices,
   elapsedMonths,
+  emptyMetrics,
   fiscalMonthLabel,
   fiscalMonths,
   fiscalYearOf,
@@ -38,7 +41,7 @@ import {
   summarizeSeries,
   toMonthlyCsv,
 } from '@/services/telemed';
-import type { MonthlyServiceRow, MonthlyTotalRow, ServiceKey } from '@/services/telemed';
+import type { Metrics, MonthlyServiceRow, MonthlyTotalRow } from '@/services/telemed';
 import {
   EmptyState,
   ErrorState,
@@ -54,9 +57,10 @@ import { MonthlyTrendChart } from '@/components/telemed/MonthlyTrendChart';
 import type { TrendMetric } from '@/components/telemed/MonthlyTrendChart';
 import { MonthlyTable } from '@/components/telemed/MonthlyTable';
 import { DetailModal } from '@/components/telemed/DetailModal';
-import type { ServiceTone } from '@/components/telemed/serviceTheme';
+import { TOTAL_VISUAL, withVisuals } from '@/components/telemed/serviceTheme';
+import type { ServiceEntry } from '@/components/telemed/serviceTheme';
 import type { SqlApiResponse } from '@/types';
-import { downloadTextFile } from '@/utils/format';
+import { downloadTextFile, formatNumber } from '@/utils/format';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -90,19 +94,24 @@ function errorMessage(error: Error | null): string {
   return error.message;
 }
 
-const DERIVATION: Record<ServiceTone, string> = {
-  total:
-    'Visit นับ VN ที่ไม่ซ้ำในแต่ละเดือนจากทั้ง 3 บริการ (visit ที่มีหลายรหัสนับครั้งเดียว) · จำนวนเงินคือผลรวม sum_price ของทุกรายการ · รายการไม่คิดเงินคือรายการที่ unitprice = 0',
-  b2b: 'นับ VN ที่ไม่ซ้ำของรหัส 3002487 ในแต่ละเดือน · จำนวนเงินคือผลรวม sum_price ของรายการรหัสนี้ · รายการไม่คิดเงินคือรายการที่ unitprice = 0',
-  b2c: 'นับ VN ที่ไม่ซ้ำของรหัส 3002488 ในแต่ละเดือน · จำนวนเงินคือผลรวม sum_price ของรายการรหัสนี้ · รายการไม่คิดเงินคือรายการที่ unitprice = 0',
-  telehealth:
-    'นับ VN ที่ไม่ซ้ำของรหัส 3002416 ในแต่ละเดือน · จำนวนเงินคือผลรวม sum_price ของรายการรหัสนี้ · รายการไม่คิดเงินคือรายการที่ unitprice = 0',
-};
+/** Plain-language explanation of where a card's numbers come from. */
+function derivationFor(service: ServiceEntry | null, year: Metrics): string {
+  const visits = service
+    ? `นับ VN ที่ไม่ซ้ำของรหัส ${service.icode} (รหัสมาตรฐาน ${service.standardCode || 'TELMED'}) ในแต่ละเดือน`
+    : 'Visit นับ VN ที่ไม่ซ้ำในแต่ละเดือนจากทุกรหัสที่ตั้งรหัสมาตรฐาน TELMED (visit ที่มีหลายรหัสนับครั้งเดียว)';
+  const amount = service
+    ? 'จำนวนเงินคือผลรวม sum_price ของรายการรหัสนี้'
+    : 'จำนวนเงินคือผลรวม sum_price ของทุกรายการ';
+  const parts = [visits, amount, 'รายการไม่คิดเงินคือรายการที่ unitprice = 0'];
+  if (year.noVnRows > 0) {
+    parts.push(
+      `ปีงบนี้มี ${formatNumber(year.noVnRows)} รายการที่ไม่มี VN จึงนับ Visit จาก HN + วันที่รับบริการแทน`,
+    );
+  }
+  return parts.join(' · ');
+}
 
-const TOTAL_CARD = {
-  label: 'รวมทุกบริการ',
-  description: 'B2B · B2C · Telehealth',
-};
+const TOTAL_LABEL = 'รวมทุกบริการ';
 
 // ---------------------------------------------------------------------------
 // Page
@@ -119,7 +128,8 @@ export default function TelemedDashboard() {
 
   const [fiscalYear, setFiscalYear] = useState(currentFiscalYear);
   const [metric, setMetric] = useState<TrendMetric>('visits');
-  const [detail, setDetail] = useState<ServiceTone | null>(null);
+  /** {@link TOTAL_KEY} or an icode; `null` while the modal is closed. */
+  const [detail, setDetail] = useState<string | null>(null);
 
   const { data, error, isLoading, isError, execute } = useQuery<TelemedData>({
     queryFn: async () => {
@@ -145,15 +155,18 @@ export default function TelemedDashboard() {
 
   const rows = useMemo(() => data?.rows ?? [], [data]);
   const totals = useMemo(() => data?.totals ?? [], [data]);
+  // Services from both fetched fiscal years, so each year has the same keys.
+  const services = useMemo(() => withVisuals(deriveServices(rows)), [rows]);
 
   const series = useMemo(
-    () => buildFiscalSeries(rows, totals, fiscalYear, today),
-    [rows, totals, fiscalYear, today],
+    () => buildFiscalSeries(rows, totals, services, fiscalYear, today),
+    [rows, totals, services, fiscalYear, today],
   );
   const previousSeries = useMemo(
-    () => buildFiscalSeries(rows, totals, fiscalYear - 1, today),
-    [rows, totals, fiscalYear, today],
+    () => buildFiscalSeries(rows, totals, services, fiscalYear - 1, today),
+    [rows, totals, services, fiscalYear, today],
   );
+  const yearSummary = useMemo(() => summarizeSeries(series), [series]);
 
   // Compare like with like: an in-progress year against the same months of
   // the year before, never against a full year.
@@ -177,7 +190,7 @@ export default function TelemedDashboard() {
     downloadTextFile(csvFilename(fiscalYear), toMonthlyCsv(rows, fiscalYear));
   }, [rows, fiscalYear]);
 
-  const selectService = useCallback((key: ServiceKey) => setDetail(key), []);
+  const selectService = useCallback((icode: string) => setDetail(icode), []);
 
   // --- Render flags -------------------------------------------------------
 
@@ -186,25 +199,31 @@ export default function TelemedDashboard() {
   const ready = !isLoading && !isError && data !== null && hasYearData;
   const canGoBack = options.includes(fiscalYear - 1);
 
-  const cards: Array<{
-    tone: ServiceTone;
-    label: string;
-    description: string;
-    now: { visits: number; amount: number };
-    before: { visits: number; amount: number };
-  }> = [
-    { tone: 'total', ...TOTAL_CARD, now: current.total, before: previous.total },
-    ...TELEMED_SERVICES.map((s) => ({
-      tone: s.key,
-      label: s.label,
-      description: s.description,
-      now: current.services[s.key],
-      before: previous.services[s.key],
+  const totalDescription = `ทุกรหัสที่ตั้งรหัสมาตรฐาน TELMED (${formatNumber(services.length)} รหัส)`;
+  const none = emptyMetrics();
+
+  const cards = [
+    {
+      key: TOTAL_KEY,
+      visual: TOTAL_VISUAL,
+      featured: true,
+      label: TOTAL_LABEL,
+      description: totalDescription,
+      now: current.total,
+      before: previous.total,
+    },
+    ...services.map((s) => ({
+      key: s.icode,
+      visual: s.visual,
+      featured: false,
+      label: s.name,
+      description: `รหัส ${s.icode}`,
+      now: current.services[s.icode] ?? none,
+      before: previous.services[s.icode] ?? none,
     })),
   ];
 
-  const detailMeta =
-    detail === 'total' ? TOTAL_CARD : (TELEMED_SERVICES.find((s) => s.key === detail) ?? TOTAL_CARD);
+  const detailService = services.find((s) => s.icode === detail) ?? null;
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 px-4 py-6 sm:px-6 lg:py-8">
@@ -251,7 +270,7 @@ export default function TelemedDashboard() {
             message={
               fiscalYear === currentFiscalYear
                 ? 'ปีงบประมาณนี้เพิ่งเริ่มต้น ข้อมูลจะปรากฏเมื่อมีการบันทึกบริการ'
-                : 'ไม่พบรายการของทั้ง 3 บริการในช่วงนี้'
+                : 'ไม่พบรายการบริการ Telemedicine ในช่วงนี้'
             }
             action={
               canGoBack
@@ -269,8 +288,9 @@ export default function TelemedDashboard() {
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             {cards.map((c) => (
               <ServiceCard
-                key={c.tone}
-                tone={c.tone}
+                key={c.key}
+                visual={c.visual}
+                featured={c.featured}
                 label={c.label}
                 description={c.description}
                 visits={c.now.visits}
@@ -278,7 +298,7 @@ export default function TelemedDashboard() {
                 visitChange={percentChange(c.now.visits, c.before.visits)}
                 amountChange={percentChange(c.now.amount, c.before.amount)}
                 compareLabel={compareLabel}
-                onClick={() => setDetail(c.tone)}
+                onClick={() => setDetail(c.key)}
               />
             ))}
           </div>
@@ -303,6 +323,7 @@ export default function TelemedDashboard() {
             <MonthlyTrendChart
               series={series}
               previousSeries={previousSeries}
+              services={services}
               previousFiscalYear={fiscalYear - 1}
               metric={metric}
               onSelectService={selectService}
@@ -321,7 +342,7 @@ export default function TelemedDashboard() {
               </ToolbarButton>
             }
           >
-            <MonthlyTable series={series} />
+            <MonthlyTable series={series} services={services} />
           </SectionCard>
 
           <p className="pb-2 text-center text-xs text-muted-foreground">
@@ -335,10 +356,14 @@ export default function TelemedDashboard() {
         <DetailModal
           open
           onOpenChange={(open) => !open && setDetail(null)}
-          tone={detail}
-          title={detailMeta.label}
-          description={detailMeta.description}
-          derivation={DERIVATION[detail]}
+          selection={detailService ? detailService.icode : TOTAL_KEY}
+          visual={detailService ? detailService.visual : TOTAL_VISUAL}
+          title={detailService ? detailService.name : TOTAL_LABEL}
+          description={detailService ? `รหัส ${detailService.icode}` : totalDescription}
+          derivation={derivationFor(
+            detailService,
+            detailService ? (yearSummary.services[detailService.icode] ?? none) : yearSummary.total,
+          )}
           series={series}
           previousSeries={previousSeries}
           fiscalYear={fiscalYear}

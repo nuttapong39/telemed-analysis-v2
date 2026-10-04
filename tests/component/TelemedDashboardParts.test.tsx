@@ -8,7 +8,8 @@ import { TelemedHero } from '@/components/telemed/TelemedHero'
 import { ServiceCard } from '@/components/telemed/ServiceCard'
 import { MonthlyTable } from '@/components/telemed/MonthlyTable'
 import { FiscalYearSelect } from '@/components/telemed/primitives'
-import { buildFiscalSeries } from '@/services/telemed'
+import { serviceVisual, withVisuals } from '@/components/telemed/serviceTheme'
+import { buildFiscalSeries, deriveServices } from '@/services/telemed'
 import type { MonthlyServiceRow } from '@/services/telemed'
 
 function row(overrides: Partial<MonthlyServiceRow> = {}): MonthlyServiceRow {
@@ -48,9 +49,9 @@ describe('TelemedHero', () => {
 
 describe('ServiceCard', () => {
   const base = {
-    tone: 'b2b' as const,
+    visual: serviceVisual(0),
     label: 'B2B',
-    description: 'บริการร่วมกับ รพ.สต.',
+    description: 'รหัส 3002487',
     visits: 1234,
     amount: 56789,
     visitChange: 15,
@@ -61,9 +62,15 @@ describe('ServiceCard', () => {
   it('shows the service, its visits and its amount', () => {
     render(<ServiceCard {...base} onClick={() => {}} />)
     const card = screen.getByRole('button', { name: /B2B/ })
-    expect(within(card).getByText('บริการร่วมกับ รพ.สต.')).toBeInTheDocument()
+    expect(within(card).getByText('รหัส 3002487')).toBeInTheDocument()
     expect(within(card).getByText('1,234')).toBeInTheDocument()
     expect(within(card).getByText('56,789')).toBeInTheDocument()
+  })
+
+  it('keeps a long hospital-given name readable in full on hover', () => {
+    const name = 'ค่าบริการการแพทย์ทางไกล (Telemedicine) ร่วมกับ รพ.สต. เครือข่าย'
+    render(<ServiceCard {...base} label={name} onClick={() => {}} />)
+    expect(screen.getByText(name)).toHaveAttribute('title', name)
   })
 
   it('shows a signed year-over-year change for each figure', () => {
@@ -100,34 +107,38 @@ describe('FiscalYearSelect', () => {
 })
 
 describe('MonthlyTable', () => {
-  const series = buildFiscalSeries(
-    [
-      row({ month: '2025-10', icode: '3002487', visits: 3, amount: 300 }),
-      row({ month: '2025-10', icode: '3002416', visits: 5, amount: 500 }),
-    ],
-    [],
-    2570,
-    new Date(2026, 9, 15),
-  )
+  const rows = [
+    row({ month: '2026-10', icode: '3002487', serviceName: 'B2B', visits: 3, amount: 300 }),
+    row({ month: '2026-10', icode: '3002416', serviceName: 'Telehealth', visits: 5, amount: 500 }),
+  ]
+  const services = withVisuals(deriveServices(rows))
+  const series = buildFiscalSeries(rows, [], services, 2570, new Date(2026, 9, 15))
 
   it('lists all twelve fiscal months plus a total row', () => {
-    render(<MonthlyTable series={series} />)
-    const rows = screen.getAllByRole('row')
+    render(<MonthlyTable series={series} services={services} />)
+    const tableRows = screen.getAllByRole('row')
     // header + 12 months + total
-    expect(rows).toHaveLength(14)
+    expect(tableRows).toHaveLength(14)
     expect(screen.getByText('ต.ค. 69')).toBeInTheDocument()
     expect(screen.getByText('ก.ย. 70')).toBeInTheDocument()
     expect(screen.getByRole('rowheader', { name: 'รวม' })).toBeInTheDocument()
   })
 
-  it('orders the service columns B2B, B2C, Telehealth, then total', () => {
-    render(<MonthlyTable series={series} />)
+  it('has one column per service, ordered by code, then the total', () => {
+    render(<MonthlyTable series={series} services={services} />)
     const headers = screen.getAllByRole('columnheader').map((h) => h.textContent)
-    expect(headers).toEqual(['เดือน', 'B2B', 'B2C', 'Telehealth', 'รวม'])
+    expect(headers).toEqual(['เดือน', 'Telehealth', 'B2B', 'รวม'])
+  })
+
+  it('works for a hospital with a single TELMED service', () => {
+    const one = withVisuals([services[0]])
+    render(<MonthlyTable series={buildFiscalSeries(rows, [], one, 2570, new Date(2026, 9, 15))} services={one} />)
+    const headers = screen.getAllByRole('columnheader').map((h) => h.textContent)
+    expect(headers).toEqual(['เดือน', 'Telehealth', 'รวม'])
   })
 
   it('marks months that have not started yet', () => {
-    render(<MonthlyTable series={series} />)
+    render(<MonthlyTable series={series} services={services} />)
     const future = screen.getByText('ก.ย. 70').closest('tr')
     expect(future).toHaveAttribute('data-future', 'true')
   })

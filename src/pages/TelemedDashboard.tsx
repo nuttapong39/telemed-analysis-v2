@@ -311,9 +311,12 @@ export default function TelemedDashboard() {
           <EmptyState
             title={`ยังไม่มีบริการ Telemedicine ในปีงบประมาณ ${fiscalYear}`}
             message={
-              fiscalYear === currentFiscalYear
-                ? 'ปีงบประมาณนี้เพิ่งเริ่มต้น ข้อมูลจะปรากฏเมื่อมีการบันทึกบริการ'
-                : 'ไม่พบรายการบริการ Telemedicine ในช่วงนี้'
+              // No TELMED rows in either fetched year: most likely a setup gap.
+              services.length === 0
+                ? 'ไม่พบรายการค่าบริการที่ตั้งรหัสมาตรฐาน TELMED (ประเภท 3) ในปีงบนี้และปีก่อน — ตรวจสอบว่ารายการค่าบริการ Telemedicine ใน HOSxP ตั้งรหัส ADP ของ สปสช. เป็น TELMED แล้ว'
+                : fiscalYear === currentFiscalYear
+                  ? 'ปีงบประมาณนี้เพิ่งเริ่มต้น ข้อมูลจะปรากฏเมื่อมีการบันทึกบริการ'
+                  : 'ไม่พบรายการบริการ Telemedicine ในช่วงนี้'
             }
             action={
               canGoBack

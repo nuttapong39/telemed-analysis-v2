@@ -554,14 +554,33 @@ export function percentChange(current: number, previous: number): number | null 
 // CSV
 // ---------------------------------------------------------------------------
 
+/** The fiscal year's summary rows, ordered by month, icode, then visit type. */
+export function selectFiscalYearRows(
+  rows: readonly MonthlyServiceRow[],
+  fiscalYear: number,
+): MonthlyServiceRow[] {
+  const months = new Set(fiscalMonths(fiscalYear));
+  return rows
+    .filter((r) => months.has(r.month))
+    .sort(
+      (a, b) =>
+        a.month.localeCompare(b.month) ||
+        a.icode.localeCompare(b.icode) ||
+        a.visitTypeCode.localeCompare(b.visitTypeCode),
+    );
+}
+
 /** Columns emitted by {@link toMonthlyCsv}, matching the summary query. */
 const CSV_COLUMNS: ReadonlyArray<{
   header: string;
-  get: (r: MonthlyServiceRow) => string;
+  get: (r: MonthlyServiceRow, names: ReadonlyMap<string, string>) => string;
 }> = [
   { header: 'year_month', get: (r) => r.month },
-  { header: 'icode', get: (r) => r.icode },
+  { header: 'standard_code', get: (r) => r.standardCode },
+  { header: 'local_icode', get: (r) => r.icode },
   { header: 'service_name', get: (r) => r.serviceName },
+  { header: 'visit_type_code', get: (r) => r.visitTypeCode },
+  { header: 'visit_type_name', get: (r, names) => visitTypeLabel(r.visitTypeCode, names) },
   { header: 'item_rows', get: (r) => String(r.itemRows) },
   { header: 'visit_count', get: (r) => String(r.visits) },
   { header: 'total_qty', get: (r) => String(r.qty) },
@@ -580,16 +599,15 @@ function csvField(value: string): string {
   return withoutMarker;
 }
 
-/** The fiscal year's summary rows as CSV, ordered by month then icode. */
-export function toMonthlyCsv(rows: readonly MonthlyServiceRow[], fiscalYear: number): string {
-  const months = new Set(fiscalMonths(fiscalYear));
-  const selected = rows
-    .filter((r) => months.has(r.month))
-    .sort((a, b) => a.month.localeCompare(b.month) || a.icode.localeCompare(b.icode));
-
+/** The fiscal year's summary rows as CSV, one line per month × service × visit type. */
+export function toMonthlyCsv(
+  rows: readonly MonthlyServiceRow[],
+  fiscalYear: number,
+  visitTypeNames: ReadonlyMap<string, string>,
+): string {
   const lines = [CSV_COLUMNS.map((c) => c.header).join(',')];
-  for (const r of selected) {
-    lines.push(CSV_COLUMNS.map((c) => csvField(c.get(r))).join(','));
+  for (const r of selectFiscalYearRows(rows, fiscalYear)) {
+    lines.push(CSV_COLUMNS.map((c) => csvField(c.get(r, visitTypeNames))).join(','));
   }
   return lines.join('\n');
 }

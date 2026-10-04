@@ -183,6 +183,10 @@ export default function TelemedDashboard() {
 
   const rows = useMemo(() => data?.rows ?? [], [data]);
   const totals = useMemo(() => data?.totals ?? [], [data]);
+  const visitTypeNames = useMemo(
+    () => data?.visitTypeNames ?? new Map<string, string>(),
+    [data],
+  );
   // Services from both fetched fiscal years, so each year has the same keys.
   const services = useMemo(() => withVisuals(deriveServices(rows)), [rows]);
 
@@ -215,8 +219,8 @@ export default function TelemedDashboard() {
   }, [fiscalYear, monthCount]);
 
   const exportCsv = useCallback(() => {
-    downloadTextFile(csvFilename(fiscalYear), toMonthlyCsv(rows, fiscalYear));
-  }, [rows, fiscalYear]);
+    downloadTextFile(csvFilename(fiscalYear), toMonthlyCsv(rows, fiscalYear, visitTypeNames));
+  }, [rows, fiscalYear, visitTypeNames]);
 
   const selectService = useCallback((icode: string) => setDetail(icode), []);
 
@@ -253,18 +257,10 @@ export default function TelemedDashboard() {
 
   const detailService = services.find((s) => s.icode === detail) ?? null;
   const detailSelection = detailService ? detailService.icode : TOTAL_KEY;
-  const visitTypeNames = data?.visitTypeNames;
   const visitTypes = useMemo(() => {
     if (detail === null) return [];
     const selection = services.some((s) => s.icode === detail) ? detail : TOTAL_KEY;
-    return summarizeByVisitType(
-      rows,
-      totals,
-      selection,
-      fiscalYear,
-      monthCount,
-      visitTypeNames ?? new Map(),
-    );
+    return summarizeByVisitType(rows, totals, selection, fiscalYear, monthCount, visitTypeNames);
   }, [detail, services, rows, totals, fiscalYear, monthCount, visitTypeNames]);
 
   return (

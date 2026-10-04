@@ -28,6 +28,7 @@ import {
   normalizeVisitTypeNames,
   visitTypeLabel,
   summarizeByVisitType,
+  selectFiscalYearRows,
 } from '@/services/telemed';
 import type { MonthlyServiceRow, TelemedService } from '@/services/telemed';
 
@@ -584,27 +585,51 @@ describe('percentChange', () => {
 // CSV
 // ---------------------------------------------------------------------------
 
-describe('toMonthlyCsv', () => {
-  it('emits the query columns for the fiscal year only, ordered by month then icode', () => {
-    const csv = toMonthlyCsv(
+describe('selectFiscalYearRows', () => {
+  it('keeps the fiscal year only, ordered by month, then code, then visit type', () => {
+    const selected = selectFiscalYearRows(
       [
-        row({ month: '2025-11', icode: '3002416' }),
-        row({ month: '2025-10', icode: '3002488', serviceName: 'B2C, คนไข้' }),
-        row({ month: '2025-10', icode: '3002416' }),
+        row({ month: '2025-11', icode: '3002416', visitTypeCode: '01' }),
+        row({ month: '2025-10', icode: '3002488', visitTypeCode: '01' }),
+        row({ month: '2025-10', icode: '3002416', visitTypeCode: '02' }),
+        row({ month: '2025-10', icode: '3002416', visitTypeCode: '' }),
         row({ month: '2024-10', icode: '3002416' }),
       ],
       2569,
     );
-    const lines = csv.split('\n');
-    expect(lines[0]).toBe(
-      'year_month,icode,service_name,item_rows,visit_count,total_qty,total_amount,zero_price_rows',
-    );
-    expect(lines.slice(1).map((l) => l.split(',').slice(0, 2).join(','))).toEqual([
-      '2025-10,3002416',
-      '2025-10,3002488',
-      '2025-11,3002416',
+    expect(selected.map((r) => `${r.month}/${r.icode}/${r.visitTypeCode}`)).toEqual([
+      '2025-10/3002416/',
+      '2025-10/3002416/02',
+      '2025-10/3002488/01',
+      '2025-11/3002416/01',
     ]);
-    expect(lines[2]).toContain('"B2C, คนไข้"');
+  });
+});
+
+describe('toMonthlyCsv', () => {
+  const names = new Map([['01', 'มาเอง']]);
+  const csv = toMonthlyCsv(
+    [
+      row({ month: '2025-10', icode: '3002488', serviceName: 'B2C, คนไข้', visitTypeCode: '01' }),
+      row({ month: '2025-10', icode: '3002416', visitTypeCode: '', visits: 2, noVnRows: 2 }),
+      row({ month: '2024-10', icode: '3002416' }),
+    ],
+    2569,
+    names,
+  );
+  const lines = csv.split('\n');
+
+  it('emits one line per month, service and visit type, at the query grain', () => {
+    expect(lines[0]).toBe(
+      'year_month,standard_code,local_icode,service_name,visit_type_code,visit_type_name,' +
+        'item_rows,visit_count,total_qty,total_amount,zero_price_rows',
+    );
+    expect(lines).toHaveLength(3);
+    expect(lines[1]).toBe('2025-10,TELMED,3002416,Telehealth,,ไม่ระบุ,10,2,10,1000,2');
+  });
+
+  it('names visit types and escapes service names with commas', () => {
+    expect(lines[2]).toBe('2025-10,TELMED,3002488,"B2C, คนไข้",01,มาเอง,10,8,10,1000,2');
   });
 });
 

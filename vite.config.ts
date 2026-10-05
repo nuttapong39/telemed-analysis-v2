@@ -24,6 +24,32 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  build: {
+    rolldownOptions: {
+      output: {
+        // Keep the chart and table libraries out of the dashboard chunk: they
+        // change rarely, so they cache across deploys, and the dashboard chunk
+        // stays under the 500 kB warning limit. React gets its own, higher-
+        // priority group; otherwise it is captured as a recharts dependency and
+        // the login screen would preload the whole chart library.
+        codeSplitting: {
+          groups: [
+            {
+              name: 'vendor-react',
+              test: /node_modules[\\/](react|react-dom|scheduler|clsx)[\\/]/,
+              priority: 20,
+            },
+            {
+              name: 'vendor-charts',
+              test: /node_modules[\\/](recharts|d3-[^\\/]+|victory-vendor)[\\/]/,
+              priority: 10,
+            },
+            { name: 'vendor-table', test: /node_modules[\\/]@tanstack[\\/]/, priority: 10 },
+          ],
+        },
+      },
+    },
+  },
   test: {
     globals: true,
     environment: 'jsdom',

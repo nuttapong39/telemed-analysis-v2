@@ -2,9 +2,9 @@
 // Telemedicine Dashboard - drill-down detail modal
 //
 // Opened from a service card or a chart segment. Answers: how is the figure
-// derived, how does it compare with the prior fiscal year, and how did it move
-// month by month. Everything is sliced from the fiscal series the dashboard
-// already holds — no second fetch.
+// derived, how does it compare with the prior fiscal year, which visit types
+// it came from, and how did it move month by month. Everything is sliced from
+// data the dashboard already holds — no second fetch.
 // =============================================================================
 
 import { useState } from 'react';
@@ -28,17 +28,21 @@ import {
 } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 import { ChangeBadge, SegmentedToggle } from '@/components/telemed/primitives';
-import { SERVICE_VISUALS } from '@/components/telemed/serviceTheme';
-import type { ServiceTone } from '@/components/telemed/serviceTheme';
+import type { ServiceVisual } from '@/components/telemed/serviceTheme';
 import type { TrendMetric } from '@/components/telemed/MonthlyTrendChart';
-import { percentChange } from '@/services/telemed';
-import type { FiscalMonthPoint, Metrics } from '@/services/telemed';
+import { TOTAL_KEY, addInto, emptyMetrics, percentChange } from '@/services/telemed';
+import type { FiscalMonthPoint, Metrics, VisitTypeShare } from '@/services/telemed';
 import { NO_VALUE, formatBaht, formatNumber, formatPercent } from '@/utils/format';
+
+/** Trend plot height in px. */
+const CHART_HEIGHT = 208;
 
 interface DetailModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  tone: ServiceTone;
+  /** {@link TOTAL_KEY} for all services, otherwise the service's icode. */
+  selection: string;
+  visual: ServiceVisual;
   title: string;
   description: string;
   /** Plain-language explanation of where the numbers come from. */
@@ -49,29 +53,26 @@ interface DetailModalProps {
   /** Months of the fiscal year that have started — the comparison window. */
   monthCount: number;
   compareLabel: string;
+  /** Visits and amount per visit type over the comparison window. */
+  visitTypes: readonly VisitTypeShare[];
 }
 
-function pick(point: FiscalMonthPoint, tone: ServiceTone): Metrics {
-  return tone === 'total' ? point.total : point.services[tone];
+function pick(point: FiscalMonthPoint, selection: string): Metrics {
+  if (selection === TOTAL_KEY) return point.total;
+  return point.services[selection] ?? emptyMetrics();
 }
 
-function sum(points: readonly FiscalMonthPoint[], tone: ServiceTone, count: number): Metrics {
-  const out: Metrics = { itemRows: 0, visits: 0, qty: 0, amount: 0, zeroPriceRows: 0 };
-  for (const p of points.slice(0, count)) {
-    const m = pick(p, tone);
-    out.itemRows += m.itemRows;
-    out.visits += m.visits;
-    out.qty += m.qty;
-    out.amount += m.amount;
-    out.zeroPriceRows += m.zeroPriceRows;
-  }
+function sum(points: readonly FiscalMonthPoint[], selection: string, count: number): Metrics {
+  const out = emptyMetrics();
+  for (const p of points.slice(0, count)) addInto(out, pick(p, selection));
   return out;
 }
 
 export function DetailModal({
   open,
   onOpenChange,
-  tone,
+  selection,
+  visual,
   title,
   description,
   derivation,
@@ -80,21 +81,21 @@ export function DetailModal({
   fiscalYear,
   monthCount,
   compareLabel,
+  visitTypes,
 }: DetailModalProps) {
   const [metric, setMetric] = useState<TrendMetric>('visits');
-  const visual = SERVICE_VISUALS[tone];
   const Icon = visual.icon;
-  const gradientId = `detail-fill-${tone}`;
+  const gradientId = `detail-fill-${selection}`;
 
-  const current = sum(series, tone, monthCount);
-  const previous = sum(previousSeries, tone, monthCount);
+  const current = sum(series, selection, monthCount);
+  const previous = sum(previousSeries, selection, monthCount);
   const avg = (m: Metrics) => (m.visits > 0 ? m.amount / m.visits : 0);
   const zeroShare = (m: Metrics) => (m.itemRows > 0 ? (m.zeroPriceRows / m.itemRows) * 100 : 0);
 
   const chart = series.map((p, i) => ({
     label: p.label,
-    current: p.isFuture ? null : pick(p, tone)[metric],
-    previous: previousSeries[i] ? pick(previousSeries[i], tone)[metric] : 0,
+    current: p.isFuture ? null : pick(p, selection)[metric],
+    previous: previousSeries[i] ? pick(previousSeries[i], selection)[metric] : 0,
   }));
   const format = metric === 'amount' ? formatBaht : (v: number) => formatNumber(v);
 
@@ -115,7 +116,10 @@ export function DetailModal({
       label: 'เฉลี่ยต่อ Visit',
       value: current.visits > 0 ? formatBaht(avg(current)) : NO_VALUE,
       before: previous.visits > 0 ? formatBaht(avg(previous)) : NO_VALUE,
-      change: percentChange(avg(current), avg(previous)),
+      // With no visits there is no average: say so rather than show a -100% drop.
+      ...(current.visits > 0
+        ? { change: percentChange(avg(current), avg(previous)) }
+        : { sub: 'ไม่มี Visit ในช่วงนี้' }),
     },
     {
       label: 'รายการไม่คิดเงิน',
@@ -171,6 +175,57 @@ export function DetailModal({
           </div>
         </section>
 
+        {/* Visit types ------------------------------------------------------ */}
+        <section aria-labelledby="detail-visit-types">
+          <h3 id="detail-visit-types" className="mb-1 text-sm font-semibold text-foreground">
+            แยกตามประเภทการมา
+          </h3>
+          <p className="mb-3 text-xs text-muted-foreground">{compareLabel}</p>
+          {visitTypes.length === 0 ? (
+            <p className="rounded-xl border border-dashed border-border/70 px-4 py-6 text-center text-sm text-muted-foreground">
+              ไม่มีรายการในช่วงที่เปรียบเทียบ
+            </p>
+          ) : (
+            <div className="overflow-x-auto rounded-xl border border-border/70">
+              <table className="w-full min-w-[480px] text-sm">
+                <thead className="bg-muted/50 text-xs text-muted-foreground">
+                  <tr>
+                    <th scope="col" className="px-3 py-2 text-left font-medium">ประเภทการมา</th>
+                    <th scope="col" className="px-3 py-2 text-right font-medium">Visit</th>
+                    <th scope="col" className="px-3 py-2 text-right font-medium">ยอดเงิน (บาท)</th>
+                    <th scope="col" className="px-3 py-2 text-right font-medium">สัดส่วน Visit</th>
+                    <th scope="col" className="px-3 py-2 text-right font-medium">
+                      Visit ปีงบ {fiscalYear - 1}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border/50">
+                  {visitTypes.map((v) => (
+                    <tr key={v.code}>
+                      <th scope="row" className="px-3 py-2 text-left font-medium">
+                        {v.name}
+                        {v.code !== '' && (
+                          <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                            {v.code}
+                          </span>
+                        )}
+                      </th>
+                      <td className="px-3 py-2 text-right font-medium tabular-nums">
+                        {formatNumber(v.visits)}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatNumber(v.amount)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatPercent(v.share)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+                        {formatNumber(v.previousVisits)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
         {/* Trend ------------------------------------------------------------ */}
         <section>
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
@@ -185,8 +240,9 @@ export function DetailModal({
               ]}
             />
           </div>
-          <div className="h-52 w-full">
-            <ResponsiveContainer width="100%" height="100%">
+          {/* Numeric height: see MonthlyTrendChart. */}
+          <div className="w-full min-w-0">
+            <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
               <ComposedChart data={chart} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
                 <defs>
                   <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
@@ -263,8 +319,8 @@ export function DetailModal({
               </thead>
               <tbody className="divide-y divide-border/50">
                 {series.map((p, i) => {
-                  const m = pick(p, tone);
-                  const before = previousSeries[i] ? pick(previousSeries[i], tone) : null;
+                  const m = pick(p, selection);
+                  const before = previousSeries[i] ? pick(previousSeries[i], selection) : null;
                   return (
                     <tr key={p.month} className={cn(p.isFuture && 'text-muted-foreground/50')}>
                       <th scope="row" className="px-3 py-2 text-left font-medium">{p.label}</th>

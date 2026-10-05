@@ -1,16 +1,36 @@
 // =============================================================================
 // Auth shell - shared frame for the login and session-expired screens
 //
-// Left (desktop only): brand, the telemedicine illustration and the three
-// services. Right: a white card holding the form passed in as children.
+// Left (desktop only): brand, the telemedicine illustration and what the
+// dashboard offers. Right: a white card holding the form passed in as children.
 // =============================================================================
 
 import type { ReactNode } from 'react';
+import { CalendarRange, MonitorSmartphone, TableProperties } from 'lucide-react';
 import { BrandMark } from '@/components/brand/BrandMark';
 import { TelemedIllustration } from '@/components/telemed/TelemedIllustration';
-import { SERVICE_VISUALS } from '@/components/telemed/serviceTheme';
-import { TELEMED_SERVICES } from '@/services/telemed';
 import { cn } from '@/lib/utils';
+
+const HIGHLIGHTS = [
+  {
+    icon: MonitorSmartphone,
+    title: 'ทุกรหัส TELMED',
+    description: 'อ่านจากรหัสมาตรฐาน สปสช.',
+    tile: 'bg-teal-50 text-teal-600 ring-1 ring-teal-100',
+  },
+  {
+    icon: CalendarRange,
+    title: 'ตามปีงบประมาณ',
+    description: 'เทียบกับปีงบก่อนหน้า',
+    tile: 'bg-sky-50 text-sky-600 ring-1 ring-sky-100',
+  },
+  {
+    icon: TableProperties,
+    title: 'ค้นหา · ส่งออก',
+    description: 'ตารางรายละเอียดและ CSV',
+    tile: 'bg-indigo-50 text-indigo-500 ring-1 ring-indigo-100',
+  },
+];
 
 export function AuthShell({ children }: { children: ReactNode }) {
   return (
@@ -42,19 +62,15 @@ export function AuthShell({ children }: { children: ReactNode }) {
         </div>
 
         <ul className="relative grid grid-cols-3 gap-3">
-          {TELEMED_SERVICES.map((s) => {
-            const visual = SERVICE_VISUALS[s.key];
-            const Icon = visual.icon;
-            return (
-              <li key={s.key} className="surface p-3.5">
-                <span className={cn('grid h-9 w-9 place-items-center rounded-xl', visual.tile)}>
-                  <Icon className="h-4 w-4" aria-hidden="true" />
-                </span>
-                <p className="mt-2.5 text-sm font-semibold text-foreground">{s.label}</p>
-                <p className="text-xs leading-snug text-muted-foreground">{s.description}</p>
-              </li>
-            );
-          })}
+          {HIGHLIGHTS.map(({ icon: Icon, title, description, tile }) => (
+            <li key={title} className="surface p-3.5">
+              <span className={cn('grid h-9 w-9 place-items-center rounded-xl', tile)}>
+                <Icon className="h-4 w-4" aria-hidden="true" />
+              </span>
+              <p className="mt-2.5 text-sm font-semibold text-foreground">{title}</p>
+              <p className="text-xs leading-snug text-muted-foreground">{description}</p>
+            </li>
+          ))}
         </ul>
       </aside>
 

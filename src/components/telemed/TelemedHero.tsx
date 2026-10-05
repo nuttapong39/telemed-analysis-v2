@@ -58,8 +58,8 @@ export function TelemedHero({ fiscalYear }: { fiscalYear: number }) {
           </p>
 
           <p className="mt-3 max-w-xl text-sm leading-relaxed text-muted-foreground">
-            ติดตามจำนวน Visit และยอดเงินรายเดือนของบริการ B2B (รพ.สต.), B2C (คนไข้โดยตรง)
-            และ Telehealth (โทรผ่านมือถือ) เทียบกับปีงบประมาณก่อนหน้า
+            ติดตามจำนวน Visit และยอดเงินรายเดือนของทุกบริการที่ตั้งรหัสมาตรฐาน TELMED
+            เทียบกับปีงบประมาณก่อนหน้า
           </p>
         </div>
 

@@ -9,12 +9,13 @@
 import { ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { ChangeBadge } from '@/components/telemed/primitives';
-import { SERVICE_VISUALS } from '@/components/telemed/serviceTheme';
-import type { ServiceTone } from '@/components/telemed/serviceTheme';
+import type { ServiceVisual } from '@/components/telemed/serviceTheme';
 import { formatNumber } from '@/utils/format';
 
 interface ServiceCardProps {
-  tone: ServiceTone;
+  visual: ServiceVisual;
+  /** The all-services card: larger figures and a tinted background. */
+  featured?: boolean;
   label: string;
   description: string;
   visits: number;
@@ -28,7 +29,8 @@ interface ServiceCardProps {
 }
 
 export function ServiceCard({
-  tone,
+  visual,
+  featured = false,
   label,
   description,
   visits,
@@ -39,9 +41,7 @@ export function ServiceCard({
   onClick,
   className,
 }: ServiceCardProps) {
-  const visual = SERVICE_VISUALS[tone];
   const Icon = visual.icon;
-  const featured = tone === 'total';
 
   return (
     <button
@@ -68,7 +68,10 @@ export function ServiceCard({
             <Icon className="h-5 w-5" aria-hidden="true" />
           </span>
           <span className="min-w-0">
-            <span className="block text-sm font-semibold tracking-tight text-foreground">
+            <span
+              title={label}
+              className="block truncate text-sm font-semibold tracking-tight text-foreground"
+            >
               {label}
             </span>
             <span className="block truncate text-xs text-muted-foreground">{description}</span>

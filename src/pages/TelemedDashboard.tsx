@@ -4,10 +4,13 @@
 // Sections, top to bottom:
 //   1. Hero          - heading, fiscal year, illustration
 //   2. Toolbar       - fiscal-year picker, refresh, CSV
-//   3. Service cards - all services, B2B, B2C, Telehealth: visits + amount,
-//                      each against the same months of the prior fiscal year
+//   3. Service cards - all services, then one per TELMED service (read from
+//                      the data, ordered by code): visits + amount, each
+//                      against the same months of the prior fiscal year
 //   4. Monthly trend - stacked bars by service, prior year as a dashed line
-//   5. Month table   - fiscal months × services
+//   5. Month table   - fiscal months × services, sortable
+//   6. Detail table  - month × service × visit type, searchable and sortable,
+//                      with the CSV export of the same rows
 //
 // One fetch per fiscal year (it covers the prior year too). Everything else —
 // series, year-to-date sums, deltas, modal contents, CSV — is derived
@@ -15,30 +18,36 @@
 // =============================================================================
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { BarChart3, Download, RefreshCw, Table2 } from 'lucide-react';
+import { BarChart3, Download, ListFilter, RefreshCw, Table2 } from 'lucide-react';
 
 import { useBmsSessionContext } from '@/contexts/BmsSessionContext';
 import { useQuery } from '@/hooks/useQuery';
 import { executeSqlViaApiQueued } from '@/services/bmsSession';
 import {
-  TELEMED_SERVICES,
+  TOTAL_KEY,
   buildFiscalSeries,
   buildTelemedFetchParams,
   buildTelemedMonthlySql,
   buildTelemedMonthlyTotalSql,
+  buildVisitTypeNamesSql,
   csvFilename,
+  deriveServices,
   elapsedMonths,
+  emptyMetrics,
   fiscalMonthLabel,
   fiscalMonths,
   fiscalYearOf,
   fiscalYearOptions,
   normalizeMonthlyRows,
   normalizeMonthlyTotals,
+  normalizeVisitTypeNames,
   percentChange,
+  selectFiscalYearRows,
+  summarizeByVisitType,
   summarizeSeries,
   toMonthlyCsv,
 } from '@/services/telemed';
-import type { MonthlyServiceRow, MonthlyTotalRow, ServiceKey } from '@/services/telemed';
+import type { Metrics, MonthlyServiceRow, MonthlyTotalRow } from '@/services/telemed';
 import {
   EmptyState,
   ErrorState,
@@ -53,10 +62,12 @@ import { ServiceCard } from '@/components/telemed/ServiceCard';
 import { MonthlyTrendChart } from '@/components/telemed/MonthlyTrendChart';
 import type { TrendMetric } from '@/components/telemed/MonthlyTrendChart';
 import { MonthlyTable } from '@/components/telemed/MonthlyTable';
+import { DetailDataTable } from '@/components/telemed/DetailDataTable';
 import { DetailModal } from '@/components/telemed/DetailModal';
-import type { ServiceTone } from '@/components/telemed/serviceTheme';
-import type { SqlApiResponse } from '@/types';
-import { downloadTextFile } from '@/utils/format';
+import { TOTAL_VISUAL, withVisuals } from '@/components/telemed/serviceTheme';
+import type { ServiceEntry } from '@/components/telemed/serviceTheme';
+import type { ConnectionConfig, SqlApiResponse } from '@/types';
+import { downloadTextFile, formatNumber } from '@/utils/format';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -65,6 +76,29 @@ import { downloadTextFile } from '@/utils/format';
 interface TelemedData {
   rows: MonthlyServiceRow[];
   totals: MonthlyTotalRow[];
+  /** Visit-type code → name; empty when the lookup is unavailable. */
+  visitTypeNames: Map<string, string>;
+}
+
+/**
+ * Visit-type names are a nicety: if this site's lookup cannot be read, the
+ * breakdown falls back to codes rather than failing the dashboard.
+ */
+async function loadVisitTypeNames(
+  config: ConnectionConfig,
+  marketplaceToken: string | undefined,
+): Promise<Map<string, string>> {
+  try {
+    const response = await executeSqlViaApiQueued(
+      buildVisitTypeNamesSql(),
+      config,
+      undefined,
+      marketplaceToken,
+    );
+    return response.MessageCode === 200 ? normalizeVisitTypeNames(response.data) : new Map();
+  } catch {
+    return new Map();
+  }
 }
 
 /** Throw a readable error when the API answers but not with success. */
@@ -90,19 +124,24 @@ function errorMessage(error: Error | null): string {
   return error.message;
 }
 
-const DERIVATION: Record<ServiceTone, string> = {
-  total:
-    'Visit นับ VN ที่ไม่ซ้ำในแต่ละเดือนจากทั้ง 3 บริการ (visit ที่มีหลายรหัสนับครั้งเดียว) · จำนวนเงินคือผลรวม sum_price ของทุกรายการ · รายการไม่คิดเงินคือรายการที่ unitprice = 0',
-  b2b: 'นับ VN ที่ไม่ซ้ำของรหัส 3002487 ในแต่ละเดือน · จำนวนเงินคือผลรวม sum_price ของรายการรหัสนี้ · รายการไม่คิดเงินคือรายการที่ unitprice = 0',
-  b2c: 'นับ VN ที่ไม่ซ้ำของรหัส 3002488 ในแต่ละเดือน · จำนวนเงินคือผลรวม sum_price ของรายการรหัสนี้ · รายการไม่คิดเงินคือรายการที่ unitprice = 0',
-  telehealth:
-    'นับ VN ที่ไม่ซ้ำของรหัส 3002416 ในแต่ละเดือน · จำนวนเงินคือผลรวม sum_price ของรายการรหัสนี้ · รายการไม่คิดเงินคือรายการที่ unitprice = 0',
-};
+/** Plain-language explanation of where a card's numbers come from. */
+function derivationFor(service: ServiceEntry | null, year: Metrics): string {
+  const visits = service
+    ? `นับ VN ที่ไม่ซ้ำของรหัส ${service.icode} (รหัสมาตรฐาน ${service.standardCode || 'TELMED'}) ในแต่ละเดือน`
+    : 'Visit นับ VN ที่ไม่ซ้ำในแต่ละเดือนจากทุกรหัสที่ตั้งรหัสมาตรฐาน TELMED (visit ที่มีหลายรหัสนับครั้งเดียว)';
+  const amount = service
+    ? 'จำนวนเงินคือผลรวม sum_price ของรายการรหัสนี้'
+    : 'จำนวนเงินคือผลรวม sum_price ของทุกรายการ';
+  const parts = [visits, amount, 'รายการไม่คิดเงินคือรายการที่ unitprice = 0'];
+  if (year.noVnRows > 0) {
+    parts.push(
+      `ปีงบนี้มี ${formatNumber(year.noVnRows)} รายการที่ไม่มี VN จึงนับ Visit จาก HN + วันที่รับบริการแทน`,
+    );
+  }
+  return parts.join(' · ');
+}
 
-const TOTAL_CARD = {
-  label: 'รวมทุกบริการ',
-  description: 'B2B · B2C · Telehealth',
-};
+const TOTAL_LABEL = 'รวมทุกบริการ';
 
 // ---------------------------------------------------------------------------
 // Page
@@ -119,19 +158,22 @@ export default function TelemedDashboard() {
 
   const [fiscalYear, setFiscalYear] = useState(currentFiscalYear);
   const [metric, setMetric] = useState<TrendMetric>('visits');
-  const [detail, setDetail] = useState<ServiceTone | null>(null);
+  /** {@link TOTAL_KEY} or an icode; `null` while the modal is closed. */
+  const [detail, setDetail] = useState<string | null>(null);
 
   const { data, error, isLoading, isError, execute } = useQuery<TelemedData>({
     queryFn: async () => {
-      if (!connectionConfig) return { rows: [], totals: [] };
+      if (!connectionConfig) return { rows: [], totals: [], visitTypeNames: new Map() };
       const params = buildTelemedFetchParams(fiscalYear);
-      const [monthly, totals] = await Promise.all([
+      const [monthly, totals, visitTypeNames] = await Promise.all([
         executeSqlViaApiQueued(buildTelemedMonthlySql(), connectionConfig, params, marketplaceToken),
         executeSqlViaApiQueued(buildTelemedMonthlyTotalSql(), connectionConfig, params, marketplaceToken),
+        loadVisitTypeNames(connectionConfig, marketplaceToken),
       ]);
       return {
         rows: normalizeMonthlyRows(ensureOk(monthly).data ?? []),
         totals: normalizeMonthlyTotals(ensureOk(totals).data ?? []),
+        visitTypeNames,
       };
     },
   });
@@ -145,15 +187,23 @@ export default function TelemedDashboard() {
 
   const rows = useMemo(() => data?.rows ?? [], [data]);
   const totals = useMemo(() => data?.totals ?? [], [data]);
+  const visitTypeNames = useMemo(
+    () => data?.visitTypeNames ?? new Map<string, string>(),
+    [data],
+  );
+  // Services from both fetched fiscal years, so each year has the same keys.
+  const services = useMemo(() => withVisuals(deriveServices(rows)), [rows]);
 
   const series = useMemo(
-    () => buildFiscalSeries(rows, totals, fiscalYear, today),
-    [rows, totals, fiscalYear, today],
+    () => buildFiscalSeries(rows, totals, services, fiscalYear, today),
+    [rows, totals, services, fiscalYear, today],
   );
   const previousSeries = useMemo(
-    () => buildFiscalSeries(rows, totals, fiscalYear - 1, today),
-    [rows, totals, fiscalYear, today],
+    () => buildFiscalSeries(rows, totals, services, fiscalYear - 1, today),
+    [rows, totals, services, fiscalYear, today],
   );
+  const yearSummary = useMemo(() => summarizeSeries(series), [series]);
+  const yearRows = useMemo(() => selectFiscalYearRows(rows, fiscalYear), [rows, fiscalYear]);
 
   // Compare like with like: an in-progress year against the same months of
   // the year before, never against a full year.
@@ -174,10 +224,10 @@ export default function TelemedDashboard() {
   }, [fiscalYear, monthCount]);
 
   const exportCsv = useCallback(() => {
-    downloadTextFile(csvFilename(fiscalYear), toMonthlyCsv(rows, fiscalYear));
-  }, [rows, fiscalYear]);
+    downloadTextFile(csvFilename(fiscalYear), toMonthlyCsv(rows, fiscalYear, visitTypeNames));
+  }, [rows, fiscalYear, visitTypeNames]);
 
-  const selectService = useCallback((key: ServiceKey) => setDetail(key), []);
+  const selectService = useCallback((icode: string) => setDetail(icode), []);
 
   // --- Render flags -------------------------------------------------------
 
@@ -186,25 +236,37 @@ export default function TelemedDashboard() {
   const ready = !isLoading && !isError && data !== null && hasYearData;
   const canGoBack = options.includes(fiscalYear - 1);
 
-  const cards: Array<{
-    tone: ServiceTone;
-    label: string;
-    description: string;
-    now: { visits: number; amount: number };
-    before: { visits: number; amount: number };
-  }> = [
-    { tone: 'total', ...TOTAL_CARD, now: current.total, before: previous.total },
-    ...TELEMED_SERVICES.map((s) => ({
-      tone: s.key,
-      label: s.label,
-      description: s.description,
-      now: current.services[s.key],
-      before: previous.services[s.key],
+  const totalDescription = `ทุกรหัสที่ตั้งรหัสมาตรฐาน TELMED (${formatNumber(services.length)} รหัส)`;
+  const none = emptyMetrics();
+
+  const cards = [
+    {
+      key: TOTAL_KEY,
+      visual: TOTAL_VISUAL,
+      featured: true,
+      label: TOTAL_LABEL,
+      description: totalDescription,
+      now: current.total,
+      before: previous.total,
+    },
+    ...services.map((s) => ({
+      key: s.icode,
+      visual: s.visual,
+      featured: false,
+      label: s.name,
+      description: `รหัส ${s.icode}`,
+      now: current.services[s.icode] ?? none,
+      before: previous.services[s.icode] ?? none,
     })),
   ];
 
-  const detailMeta =
-    detail === 'total' ? TOTAL_CARD : (TELEMED_SERVICES.find((s) => s.key === detail) ?? TOTAL_CARD);
+  const detailService = services.find((s) => s.icode === detail) ?? null;
+  const detailSelection = detailService ? detailService.icode : TOTAL_KEY;
+  const visitTypes = useMemo(() => {
+    if (detail === null) return [];
+    const selection = services.some((s) => s.icode === detail) ? detail : TOTAL_KEY;
+    return summarizeByVisitType(rows, totals, selection, fiscalYear, monthCount, visitTypeNames);
+  }, [detail, services, rows, totals, fiscalYear, monthCount, visitTypeNames]);
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 px-4 py-6 sm:px-6 lg:py-8">
@@ -249,9 +311,12 @@ export default function TelemedDashboard() {
           <EmptyState
             title={`ยังไม่มีบริการ Telemedicine ในปีงบประมาณ ${fiscalYear}`}
             message={
-              fiscalYear === currentFiscalYear
-                ? 'ปีงบประมาณนี้เพิ่งเริ่มต้น ข้อมูลจะปรากฏเมื่อมีการบันทึกบริการ'
-                : 'ไม่พบรายการของทั้ง 3 บริการในช่วงนี้'
+              // No TELMED rows in either fetched year: most likely a setup gap.
+              services.length === 0
+                ? 'ไม่พบรายการค่าบริการที่ตั้งรหัสมาตรฐาน TELMED (ประเภท 3) ในปีงบนี้และปีก่อน — ตรวจสอบว่ารายการค่าบริการ Telemedicine ใน HOSxP ตั้งรหัส ADP ของ สปสช. เป็น TELMED แล้ว'
+                : fiscalYear === currentFiscalYear
+                  ? 'ปีงบประมาณนี้เพิ่งเริ่มต้น ข้อมูลจะปรากฏเมื่อมีการบันทึกบริการ'
+                  : 'ไม่พบรายการบริการ Telemedicine ในช่วงนี้'
             }
             action={
               canGoBack
@@ -269,8 +334,9 @@ export default function TelemedDashboard() {
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             {cards.map((c) => (
               <ServiceCard
-                key={c.tone}
-                tone={c.tone}
+                key={c.key}
+                visual={c.visual}
+                featured={c.featured}
                 label={c.label}
                 description={c.description}
                 visits={c.now.visits}
@@ -278,7 +344,7 @@ export default function TelemedDashboard() {
                 visitChange={percentChange(c.now.visits, c.before.visits)}
                 amountChange={percentChange(c.now.amount, c.before.amount)}
                 compareLabel={compareLabel}
-                onClick={() => setDetail(c.tone)}
+                onClick={() => setDetail(c.key)}
               />
             ))}
           </div>
@@ -303,6 +369,7 @@ export default function TelemedDashboard() {
             <MonthlyTrendChart
               series={series}
               previousSeries={previousSeries}
+              services={services}
               previousFiscalYear={fiscalYear - 1}
               metric={metric}
               onSelectService={selectService}
@@ -312,8 +379,17 @@ export default function TelemedDashboard() {
           {/* 5. Month table ------------------------------------------------ */}
           <SectionCard
             title="สรุปรายเดือน"
-            description="Visit (ตัวหนา) และจำนวนเงินเป็นบาท (ตัวเล็ก) ของแต่ละบริการ"
+            description="Visit (ตัวหนา) และจำนวนเงินเป็นบาท (ตัวเล็ก) ของแต่ละบริการ · คลิกหัวคอลัมน์เพื่อเรียง"
             icon={<Table2 className="h-5 w-5" />}
+          >
+            <MonthlyTable series={series} services={services} />
+          </SectionCard>
+
+          {/* 6. Detail table ----------------------------------------------- */}
+          <SectionCard
+            title="รายละเอียดรายบริการ"
+            description="แยกตามเดือน บริการ และประเภทการมา · ค้นหาและคลิกหัวคอลัมน์เพื่อเรียง"
+            icon={<ListFilter className="h-5 w-5" />}
             aside={
               <ToolbarButton onClick={exportCsv} className="px-2.5 py-1.5 text-xs">
                 <Download className="h-3.5 w-3.5" />
@@ -321,7 +397,7 @@ export default function TelemedDashboard() {
               </ToolbarButton>
             }
           >
-            <MonthlyTable series={series} />
+            <DetailDataTable rows={yearRows} services={services} visitTypeNames={visitTypeNames} />
           </SectionCard>
 
           <p className="pb-2 text-center text-xs text-muted-foreground">
@@ -335,15 +411,20 @@ export default function TelemedDashboard() {
         <DetailModal
           open
           onOpenChange={(open) => !open && setDetail(null)}
-          tone={detail}
-          title={detailMeta.label}
-          description={detailMeta.description}
-          derivation={DERIVATION[detail]}
+          selection={detailSelection}
+          visual={detailService ? detailService.visual : TOTAL_VISUAL}
+          title={detailService ? detailService.name : TOTAL_LABEL}
+          description={detailService ? `รหัส ${detailService.icode}` : totalDescription}
+          derivation={derivationFor(
+            detailService,
+            detailService ? (yearSummary.services[detailService.icode] ?? none) : yearSummary.total,
+          )}
           series={series}
           previousSeries={previousSeries}
           fiscalYear={fiscalYear}
           monthCount={monthCount}
           compareLabel={compareLabel}
+          visitTypes={visitTypes}
         />
       )}
     </div>
